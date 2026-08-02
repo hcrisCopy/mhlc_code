@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import gc
+import importlib
 import json
 from dataclasses import dataclass
 from pathlib import Path
@@ -106,7 +107,10 @@ class NeuronHeadScorer:
         self.collector.__enter__()
 
         upstream = load_capability_trainer_module()
-        self.chat_builder = upstream.ChatBatchBuilder(
+        builder_cls = getattr(upstream, "ChatBatchBuilder", None)
+        if builder_cls is None:
+            builder_cls = importlib.import_module("aux_head_shared_utils").ChatBatchBuilder
+        self.chat_builder = builder_cls(
             self.runtime.processor,
             int(max_seq_len),
             str(head_input_mode),
