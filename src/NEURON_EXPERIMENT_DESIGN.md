@@ -202,5 +202,39 @@ layer_summary.csv
 layer_top_neuron_score_heatmap.png
 selected_density_by_layer.png
 neuron_head_final.pt
+final_metrics.json
 ```
 
+训练结束后会重新在缓存好的神经元特征上评估一次，并把 `final_metrics.json` 的内容直接打印到终端。
+
+Capability 对齐论文里的信号质量指标：
+
+```text
+roc_auc
+aupr_c
+aupr_i
+ece
+```
+
+同时保留原项目训练时常看的辅助指标：
+
+```text
+mae
+rmse
+thr_acc
+failure_precision
+failure_recall
+failure_f1
+balanced_acc
+```
+
+Resolution 对齐论文 When2Call 表里的指标：
+
+```text
+macro_f1
+accuracy
+```
+
+并保存逐类 precision / recall / f1 / support 和 confusion matrix。
+
+所有可视化都保存为本地图片文件，不使用 wandb。

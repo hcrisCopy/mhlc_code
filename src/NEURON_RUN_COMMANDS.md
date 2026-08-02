@@ -50,6 +50,14 @@ python src/08_train_capability_neuron_head.py \
 ../mhlc_data/trained_models/neuron_heads/Qwen3-VL-4B-Instruct/capability/neuron_head_final.pt
 ```
 
+训练结束会同时保存并打印：
+
+```text
+../mhlc_data/trained_models/neuron_heads/Qwen3-VL-4B-Instruct/capability/final_metrics.json
+```
+
+重点看 `roc_auc`、`aupr_c`、`aupr_i`、`ece`，这几个对齐论文里的 Capability 指标。
+
 ## 3. Resolution 神经元探测
 
 ```bash
@@ -85,6 +93,14 @@ python src/10_train_resolution_neuron_head.py \
 ```text
 ../mhlc_data/trained_models/neuron_heads/Qwen3-VL-4B-Instruct/resolution/neuron_head_final.pt
 ```
+
+训练结束会同时保存并打印：
+
+```text
+../mhlc_data/trained_models/neuron_heads/Qwen3-VL-4B-Instruct/resolution/final_metrics.json
+```
+
+重点看 `macro_f1` 和 `accuracy`，这两个对齐论文里的 When2Call Resolution 指标。
 
 ## 跑通小样本
 
@@ -173,6 +189,8 @@ python src/10_train_resolution_neuron_head.py \
 feature shard 已存在且大小正确 -> 跳过
 训练 checkpoint 存在 -> 默认续训
 ```
+
+可视化只保存本地图片，不使用 wandb。
 
 需要重跑某一阶段，在命令后加：
 

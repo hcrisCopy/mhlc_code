@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import json
 import math
-from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Any
 
@@ -106,6 +105,229 @@ def project_behavior_from_probs(probs: torch.Tensor, threshold: float) -> torch.
     return pred.where(active, torch.full_like(pred, direct_id))
 
 
+def _safe_div(num: float, den: float) -> float:
+    return float(num) / float(den) if float(den) != 0.0 else 0.0
+
+
+def _binary_confusion(labels: torch.Tensor, preds: torch.Tensor) -> torch.Tensor:
+    conf = torch.zeros(2, 2, dtype=torch.long)
+    labels = labels.detach().cpu().long().view(-1)
+    preds = preds.detach().cpu().long().view(-1)
+    for y, yhat in zip(labels.tolist(), preds.tolist()):
+        if int(y) in (0, 1) and int(yhat) in (0, 1):
+            conf[int(y), int(yhat)] += 1
+    return conf
+
+
+def _binary_metrics_from_confusion(conf: torch.Tensor) -> dict[str, Any]:
+    tn = int(conf[0, 0].item())
+    fp = int(conf[0, 1].item())
+    fn = int(conf[1, 0].item())
+    tp = int(conf[1, 1].item())
+    precision = _safe_div(tp, tp + fp)
+    recall = _safe_div(tp, tp + fn)
+    f1 = _safe_div(2 * tp, 2 * tp + fp + fn)
+    neg_precision = _safe_div(tn, tn + fn)
+    specificity = _safe_div(tn, tn + fp)
+    neg_f1 = _safe_div(2 * tn, 2 * tn + fn + fp)
+    return {
+        "accuracy": _safe_div(tp + tn, tp + tn + fp + fn),
+        "precision": precision,
+        "recall": recall,
+        "f1": f1,
+        "negative_precision": neg_precision,
+        "negative_recall": specificity,
+        "negative_f1": neg_f1,
+        "macro_precision": 0.5 * (precision + neg_precision),
+        "macro_recall": 0.5 * (recall + specificity),
+        "macro_f1": 0.5 * (f1 + neg_f1),
+        "specificity": specificity,
+        "balanced_accuracy": 0.5 * (recall + specificity),
+        "tp": tp,
+        "tn": tn,
+        "fp": fp,
+        "fn": fn,
+    }
+
+
+def _failure_metrics_from_confusion(conf: torch.Tensor) -> dict[str, Any]:
+    metrics = _binary_metrics_from_confusion(conf)
+    return {
+        "failure_precision": metrics["precision"],
+        "failure_recall": metrics["recall"],
+        "failure_f1": metrics["f1"],
+        "specificity": metrics["specificity"],
+        "balanced_acc": metrics["balanced_accuracy"],
+        "failure_confusion": conf.long().tolist(),
+        "failure_tp": metrics["tp"],
+        "failure_tn": metrics["tn"],
+        "failure_fp": metrics["fp"],
+        "failure_fn": metrics["fn"],
+    }
+
+
+def _roc_auc_binary(labels: torch.Tensor, scores: torch.Tensor) -> float | None:
+    labels = labels.detach().cpu().long().view(-1)
+    scores = scores.detach().cpu().float().view(-1)
+    pos = int((labels == 1).sum().item())
+    neg = int((labels == 0).sum().item())
+    if pos == 0 or neg == 0 or labels.numel() == 0:
+        return None
+    sorted_scores, order = torch.sort(scores, descending=False)
+    ranks = torch.empty_like(sorted_scores, dtype=torch.float64)
+    i = 0
+    rank = 1.0
+    n = int(sorted_scores.numel())
+    while i < n:
+        j = i
+        while j + 1 < n and float(sorted_scores[j + 1].item()) == float(sorted_scores[i].item()):
+            j += 1
+        ranks[i : j + 1] = 0.5 * (rank + rank + (j - i))
+        rank += float(j - i + 1)
+        i = j + 1
+    original_ranks = torch.empty_like(ranks)
+    original_ranks[order] = ranks
+    rank_sum_pos = float(original_ranks[labels == 1].sum().item())
+    auc = (rank_sum_pos - pos * (pos + 1) / 2.0) / float(pos * neg)
+    return float(auc)
+
+
+def _average_precision_binary(labels: torch.Tensor, scores: torch.Tensor) -> float | None:
+    labels = labels.detach().cpu().long().view(-1)
+    scores = scores.detach().cpu().float().view(-1)
+    n_pos = int((labels == 1).sum().item())
+    if n_pos == 0 or labels.numel() == 0:
+        return None
+    _, order = torch.sort(scores, descending=True)
+    sorted_labels = labels[order]
+    tp = 0
+    ap = 0.0
+    for rank, y in enumerate(sorted_labels.tolist(), start=1):
+        if int(y) == 1:
+            tp += 1
+            ap += tp / float(rank)
+    return float(ap / n_pos)
+
+
+def _fpr_at_tpr(labels: torch.Tensor, scores: torch.Tensor, target_tpr: float = 0.95) -> float | None:
+    labels = labels.detach().cpu().long().view(-1)
+    scores = scores.detach().cpu().float().view(-1)
+    pos = int((labels == 1).sum().item())
+    neg = int((labels == 0).sum().item())
+    if pos == 0 or neg == 0 or labels.numel() == 0:
+        return None
+    _, order = torch.sort(scores, descending=True)
+    sorted_labels = labels[order]
+    tp = 0
+    fp = 0
+    best: float | None = None
+    for y in sorted_labels.tolist():
+        if int(y) == 1:
+            tp += 1
+        else:
+            fp += 1
+        tpr = _safe_div(tp, pos)
+        if tpr >= float(target_tpr):
+            fpr = _safe_div(fp, neg)
+            best = fpr if best is None else min(best, fpr)
+    return best
+
+
+def _fixed_ece(labels: torch.Tensor, probs: torch.Tensor, bins: int) -> float:
+    labels = labels.detach().cpu().float().view(-1)
+    probs = probs.detach().cpu().float().view(-1).clamp(0.0, 1.0)
+    n = int(labels.numel())
+    if n == 0:
+        return 0.0
+    edges = torch.linspace(0.0, 1.0, int(bins) + 1)
+    ece = 0.0
+    for idx in range(int(bins)):
+        lo = edges[idx]
+        hi = edges[idx + 1]
+        if idx == int(bins) - 1:
+            mask = (probs >= lo) & (probs <= hi)
+        else:
+            mask = (probs >= lo) & (probs < hi)
+        if not bool(mask.any()):
+            continue
+        conf = float(probs[mask].mean().item())
+        acc = float(labels[mask].mean().item())
+        ece += abs(acc - conf) * _safe_div(int(mask.sum().item()), n)
+    return float(ece)
+
+
+def _adaptive_ece(labels: torch.Tensor, probs: torch.Tensor, bins: int) -> float:
+    labels = labels.detach().cpu().float().view(-1)
+    probs = probs.detach().cpu().float().view(-1).clamp(0.0, 1.0)
+    n = int(labels.numel())
+    if n == 0:
+        return 0.0
+    _, order = torch.sort(probs, descending=False)
+    labels = labels[order]
+    probs = probs[order]
+    ece = 0.0
+    for idx in range(int(bins)):
+        start = round(idx * n / int(bins))
+        end = round((idx + 1) * n / int(bins))
+        if end <= start:
+            continue
+        label_bin = labels[start:end]
+        prob_bin = probs[start:end]
+        conf = float(prob_bin.mean().item())
+        acc = float(label_bin.mean().item())
+        ece += abs(acc - conf) * _safe_div(end - start, n)
+    return float(ece)
+
+
+def _capability_final_metrics(labels: torch.Tensor, probs: torch.Tensor, threshold: float, bins: int) -> dict[str, Any]:
+    labels = labels.detach().cpu().float().view(-1).clamp(0.0, 1.0)
+    probs = probs.detach().cpu().float().view(-1).clamp(0.0, 1.0)
+    correct = (labels >= float(threshold)).long()
+    pred_correct = (probs >= float(threshold)).long()
+    failure = 1 - correct
+    pred_failure = 1 - pred_correct
+    correct_conf = _binary_confusion(correct, pred_correct)
+    failure_conf = _binary_confusion(failure, pred_failure)
+    threshold_metrics = _binary_metrics_from_confusion(correct_conf)
+    ece_fixed = _fixed_ece(correct.float(), probs, int(bins))
+    ece_adaptive = _adaptive_ece(correct.float(), probs, int(bins))
+    eps = 1.0e-12
+    clamped = probs.clamp(eps, 1.0 - eps)
+    nll = -torch.mean(correct.float() * torch.log(clamped) + (1.0 - correct.float()) * torch.log(1.0 - clamped))
+    brier = torch.mean(torch.square(probs - correct.float()))
+    metrics: dict[str, Any] = {
+        "num_rows": int(labels.numel()),
+        "num_correct": int(correct.sum().item()),
+        "num_incorrect": int(failure.sum().item()),
+        "label_threshold": float(threshold),
+        "prediction_threshold": float(threshold),
+        "mae": float(torch.mean(torch.abs(probs - labels)).item()) if labels.numel() else 0.0,
+        "rmse": float(torch.sqrt(torch.mean(torch.square(probs - labels))).item()) if labels.numel() else 0.0,
+        "roc_auc": _roc_auc_binary(correct, probs),
+        "aupr_c": _average_precision_binary(correct, probs),
+        "aupr_i": _average_precision_binary(failure, 1.0 - probs),
+        "ece": ece_fixed,
+        "ece_fixed_15": ece_fixed if int(bins) == 15 else _fixed_ece(correct.float(), probs, 15),
+        "ece_adaptive_15": ece_adaptive if int(bins) == 15 else _adaptive_ece(correct.float(), probs, 15),
+        "brier": float(brier.item()) if labels.numel() else 0.0,
+        "nll": float(nll.item()) if labels.numel() else 0.0,
+        "fpr_at_95_tpr": _fpr_at_tpr(correct, probs, target_tpr=0.95),
+        "threshold_0_5": threshold_metrics,
+        "threshold_at_failure_threshold": threshold_metrics,
+        "thr_acc": threshold_metrics["accuracy"],
+        "thr_macro_precision": threshold_metrics["macro_precision"],
+        "thr_macro_recall": threshold_metrics["macro_recall"],
+        "thr_macro_f1": threshold_metrics["macro_f1"],
+        "correctness_confusion": correct_conf.long().tolist(),
+        "aupr_correct": None,
+        "aupr_incorrect": None,
+    }
+    metrics["aupr_correct"] = metrics["aupr_c"]
+    metrics["aupr_incorrect"] = metrics["aupr_i"]
+    metrics.update(_failure_metrics_from_confusion(failure_conf))
+    return metrics
+
+
 def _confusion_metrics(conf: torch.Tensor) -> dict[str, Any]:
     conf_f = conf.float()
     tp = torch.diag(conf_f)
@@ -117,7 +339,9 @@ def _confusion_metrics(conf: torch.Tensor) -> dict[str, Any]:
     names = [*HEAD_CLASS_NAMES, "direct_answer"]
     out: dict[str, Any] = {
         "acc": float(tp.sum() / torch.clamp(conf_f.sum(), min=1.0)),
+        "accuracy": float(tp.sum() / torch.clamp(conf_f.sum(), min=1.0)),
         "macro_f1": float(f1.mean()),
+        "f1": float(f1.mean()),
         "macro_precision": float(precision.mean()),
         "macro_recall": float(recall.mean()),
         "confusion": conf.long().tolist(),
@@ -127,7 +351,61 @@ def _confusion_metrics(conf: torch.Tensor) -> dict[str, Any]:
         out[f"{name}_f1"] = float(f1[idx])
         out[f"{name}_recall"] = float(recall[idx])
         out[f"{name}_precision"] = float(precision[idx])
+        out[f"{name}_support"] = int(row[idx].item())
     return out
+
+
+@torch.no_grad()
+def evaluate_neuron_head(
+    args: Any,
+    *,
+    task: str,
+    dataset: ShardedFeatureDataset,
+    head: NeuronHead,
+    mean: torch.Tensor,
+    std: torch.Tensor,
+    device: torch.device,
+) -> dict[str, Any]:
+    loader = DataLoader(
+        dataset,
+        batch_size=int(args.train_batch_size),
+        shuffle=False,
+        num_workers=0,
+        pin_memory=bool(args.pin_memory and torch.cuda.is_available()),
+        drop_last=False,
+    )
+    head.eval()
+    if task == "capability":
+        pred_parts: list[torch.Tensor] = []
+        label_parts: list[torch.Tensor] = []
+        for batch in tqdm(loader, desc="eval capability", dynamic_ncols=True):
+            features = ((batch["features"].to(device, non_blocking=True) - mean) / std).float()
+            logits = head(features)
+            pred_parts.append(torch.sigmoid(logits.squeeze(-1)).detach().cpu())
+            label_parts.append(batch["labels"].detach().cpu().float())
+        labels = torch.cat(label_parts, dim=0) if label_parts else torch.empty(0)
+        preds = torch.cat(pred_parts, dim=0) if pred_parts else torch.empty(0)
+        return _capability_final_metrics(
+            labels,
+            preds,
+            threshold=float(args.failure_threshold),
+            bins=int(getattr(args, "metric_bins", 15)),
+        )
+
+    confusion = torch.zeros(4, 4, dtype=torch.long)
+    for batch in tqdm(loader, desc="eval resolution", dynamic_ncols=True):
+        features = ((batch["features"].to(device, non_blocking=True) - mean) / std).float()
+        logits = head(features)
+        probs = torch.sigmoid(logits.detach()).cpu()
+        preds = project_behavior_from_probs(probs, float(args.decision_threshold))
+        behavior_ids = batch["behavior_ids"].cpu().long()
+        usable_cpu = batch["usable_mask"].cpu().long()
+        for y, yhat, u in zip(behavior_ids.tolist(), preds.tolist(), usable_cpu.tolist()):
+            if int(u) > 0 and int(y) >= 0:
+                confusion[int(y), int(yhat)] += 1
+    metrics = _confusion_metrics(confusion)
+    metrics["decision_threshold"] = float(args.decision_threshold)
+    return metrics
 
 
 def train_neuron_head(args: Any, *, task: str, manifest_path: Path, out_dir: Path) -> Path:
@@ -294,10 +572,23 @@ def train_neuron_head(args: Any, *, task: str, manifest_path: Path, out_dir: Pat
         },
         final_path,
     )
-    metrics: dict[str, Any] = {"steps": opt_step}
+    metrics = evaluate_neuron_head(
+        args,
+        task=task,
+        dataset=dataset,
+        head=head,
+        mean=mean,
+        std=std,
+        device=device,
+    )
+    metrics["steps"] = opt_step
     if task == "resolution":
-        metrics.update(_confusion_metrics(confusion))
+        metrics["head_class_names"] = HEAD_CLASS_NAMES
+        metrics["behavior_class_names"] = [*HEAD_CLASS_NAMES, "direct_answer"]
+        metrics["positive_class_weights"] = pos_weight.detach().cpu().tolist() if pos_weight is not None else None
+    else:
+        metrics["paper_metric_keys"] = ["roc_auc", "aupr_c", "aupr_i", "ece"]
     write_json(out_dir / "final_metrics.json", metrics)
+    print(json.dumps(metrics, ensure_ascii=False, indent=2), flush=True)
     print(f"[write] {final_path}", flush=True)
     return final_path
-

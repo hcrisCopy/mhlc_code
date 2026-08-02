@@ -48,6 +48,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--decision-threshold", type=float, default=0.5)
     parser.add_argument("--min-class-weight", type=float, default=1.0)
     parser.add_argument("--max-class-weight", type=float, default=10.0)
+    parser.add_argument("--metric-bins", type=int, default=15)
     parser.add_argument("--log-every", type=int, default=10)
     parser.add_argument("--save-every", type=int, default=1000)
     parser.add_argument("--resume", action=argparse.BooleanOptionalAction, default=True)
