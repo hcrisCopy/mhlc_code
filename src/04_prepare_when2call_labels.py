@@ -50,6 +50,12 @@ def main() -> None:
     ap.add_argument("--output-dir", default="../mhlc_data/data/train/when2call/when2call_processed_4class")
     ap.add_argument("--annotator-model-id", default="Qwen/Qwen3-30B-A3B-Instruct-2507-FP8")
     ap.add_argument("--tokenizer-id", default=None)
+    ap.add_argument(
+        "--max-rows-per-split",
+        type=int,
+        default=None,
+        help="Smoke-run row cap for each upstream When2Call split. Omit for the formal full run.",
+    )
     ap.add_argument("--batch-size", type=int, default=256)
     ap.add_argument("--max-tokens", type=int, default=16000)
     ap.add_argument("--gpu-memory-utilization", type=float, default=0.50)
@@ -104,10 +110,14 @@ def main() -> None:
         "--resume",
         "--export_parquet",
     ]
+    if args.max_rows_per_split is not None:
+        argv.extend(["--max_rows_per_split", str(args.max_rows_per_split)])
 
     print("[stage] when2call label construction")
     print(f"[output] {rel(output_dir)}")
     print(f"[annotator] {args.annotator_model_id}")
+    if args.max_rows_per_split is not None:
+        print(f"[mode] smoke max_rows_per_split={args.max_rows_per_split}; omit it for formal full run")
     with temporary_argv(argv):
         module.main()
 

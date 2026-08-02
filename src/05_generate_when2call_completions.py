@@ -25,6 +25,7 @@ def main() -> None:
     ap.add_argument("--tokenizer-path", default=None)
     ap.add_argument("--model-family", default="qwen3_vl", choices=["auto", "qwen3_5", "qwen3", "qwen3_vl", "gemma4"])
     ap.add_argument("--thinking-mode", default="off")
+    ap.add_argument("--limit", type=int, default=None, help="Smoke-run row cap. Omit for the formal full run.")
     ap.add_argument("--batch-size", type=int, default=64)
     ap.add_argument("--max-tokens", type=int, default=16000)
     ap.add_argument("--gpu-memory-utilization", type=float, default=0.90)
@@ -62,6 +63,10 @@ def main() -> None:
         args.model_family,
         "--thinking_mode",
         args.thinking_mode,
+    ]
+    if args.limit is not None:
+        argv.extend(["--limit", str(args.limit)])
+    argv.extend([
         "--batch_size",
         str(args.batch_size),
         "--max_tokens",
@@ -75,12 +80,14 @@ def main() -> None:
         "--seed",
         str(args.seed),
         "--resume",
-    ]
+    ])
 
     print("[stage] when2call target-model completion generation")
     print(f"[input] {rel(input_path)}")
     print(f"[model] {rel(model_path)}")
     print(f"[output] {rel(output_dir)}")
+    if args.limit is not None:
+        print(f"[mode] smoke limit={args.limit}; omit it for formal full run")
     with temporary_argv(argv):
         module.main()
 

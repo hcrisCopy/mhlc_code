@@ -102,6 +102,17 @@ python src/02_generate_capability_raw.py \
   --model-path ../Qwen/Qwen3-VL-4B-Instruct
 ```
 
+4090 单卡先跑通流程时，可以显式指定每个文本 source 的条数：
+
+```bash
+python src/02_generate_capability_raw.py \
+  --model-path ../Qwen/Qwen3-VL-4B-Instruct \
+  --source-counts dapo=20,triviaqa=20,apigen-mt-5k=20 \
+  --gen-chunk-size 16
+```
+
+正式全量运行时，去掉 `--source-counts` 和小 batch 参数即可。
+
 默认产物：
 
 ```text
@@ -151,7 +162,9 @@ label 规则、judge prompt、batch 参数和原项目保持一致：
 
 ```bash
 python src/03_label_capability_raw.py \
-  --judge-model-id ../Qwen/Qwen3-VL-4B-Instruct
+  --run-root ../mhlc_data/data/train/Qwen3VL/Qwen3_VL_4B_Instruct_text_only_smoke_60 \
+  --judge-model-id ../Qwen/Qwen3-VL-4B-Instruct \
+  --judge-batch-size 8
 ```
 
 正式复现时只把 `--judge-model-id` 改回上面的 30B judge 路径即可。
@@ -195,11 +208,14 @@ python src/04_prepare_when2call_labels.py \
 ```bash
 python src/04_prepare_when2call_labels.py \
   --annotator-model-id ../Qwen/Qwen3-VL-4B-Instruct \
-  --tokenizer-id ../Qwen/Qwen3-VL-4B-Instruct
+  --tokenizer-id ../Qwen/Qwen3-VL-4B-Instruct \
+  --output-dir ../mhlc_data/data/train/when2call/when2call_processed_4class_smoke \
+  --max-rows-per-split 20 \
+  --batch-size 8
 ```
 
 正式复现时只把 `--annotator-model-id` 和 `--tokenizer-id` 改回 30B annotator
-路径即可。
+路径，并去掉 `--max-rows-per-split` 和 smoke 输出目录即可。
 
 默认产物：
 
@@ -220,6 +236,17 @@ python src/05_generate_when2call_completions.py \
   --model-path ../Qwen/Qwen3-VL-4B-Instruct
 ```
 
+4090 单卡先跑通流程时：
+
+```bash
+python src/05_generate_when2call_completions.py \
+  --input-path ../mhlc_data/data/train/when2call/when2call_processed_4class_smoke/when2call_aux_labels.jsonl \
+  --output-dir ../mhlc_data/data/train/when2call/qwen3vl/Qwen3-VL-4B-Instruct_4class_smoke \
+  --model-path ../Qwen/Qwen3-VL-4B-Instruct \
+  --limit 40 \
+  --batch-size 8
+```
+
 默认产物：
 
 ```text
@@ -235,6 +262,16 @@ mhlc_data/data/train/when2call/qwen3vl/Qwen3-VL-4B-Instruct_4class/
 ```bash
 python src/06_generate_when2call_eval_completions.py \
   --model-path ../Qwen/Qwen3-VL-4B-Instruct
+```
+
+4090 单卡只做 smoke eval completion：
+
+```bash
+python src/06_generate_when2call_eval_completions.py \
+  --model-path ../Qwen/Qwen3-VL-4B-Instruct \
+  --output-path ../mhlc_data/eval_outputs/when2call/Qwen3-VL-4B-Instruct/when2call_test_generated_4class_smoke.parquet \
+  --max-eval-rows 20 \
+  --batch-size 8
 ```
 
 默认输出：

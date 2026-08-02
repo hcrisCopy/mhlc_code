@@ -67,6 +67,53 @@ def patch_text_only_sources(module: Any) -> None:
     }
 
 
+def parse_source_counts(value: str | None) -> dict[str, int] | None:
+    """Parse smoke-run counts like dapo=20,triviaqa=20,apigen-mt-5k=20."""
+    if value is None:
+        return None
+
+    allowed = set(TEXT_SOURCE_COUNTS)
+    counts: dict[str, int] = {}
+    for item in value.split(","):
+        item = item.strip()
+        if not item:
+            continue
+        if "=" not in item:
+            raise SystemExit(f"Invalid --source-counts item {item!r}; expected name=count.")
+        name, raw_count = [part.strip() for part in item.split("=", 1)]
+        if name not in allowed:
+            raise SystemExit(f"Unknown source {name!r}; allowed: {sorted(allowed)}")
+        try:
+            count = int(raw_count)
+        except ValueError as exc:
+            raise SystemExit(f"Invalid count for {name!r}: {raw_count!r}") from exc
+        if count < 0:
+            raise SystemExit(f"Count for {name!r} must be >= 0, got {count}.")
+        counts[name] = count
+
+    missing = [name for name in TEXT_SOURCE_COUNTS if name not in counts]
+    if missing:
+        raise SystemExit(f"--source-counts must include every text source; missing: {missing}")
+    if sum(counts.values()) <= 0:
+        raise SystemExit("--source-counts total must be > 0.")
+    return {name: counts[name] for name in TEXT_SOURCE_COUNTS}
+
+
+def patch_exact_source_counts(module: Any, source_counts: dict[str, int]) -> None:
+    """Make upstream count allocation return the smoke-run counts exactly."""
+
+    exact_counts = source_counts.copy()
+
+    def allocate_exact_counts(total: int, portions: Any):
+        expected_total = sum(exact_counts.values())
+        if int(total) != expected_total:
+            raise ValueError(f"Expected total_qa_pairs={expected_total}, got {total}.")
+        return module.OrderedDict((name, exact_counts[name]) for name in exact_counts)
+
+    module.SOURCE_PORTIONS = exact_counts.copy()
+    module._allocate_counts = allocate_exact_counts
+
+
 def patch_generation_progress(module: Any) -> None:
     """Mirror upstream generation logic while adding a source-level tqdm bar."""
 
@@ -205,9 +252,18 @@ def main() -> None:
     ap.add_argument("--model-path", default="../Qwen/Qwen3-VL-4B-Instruct")
     ap.add_argument("--model-family", default="qwen3_vl", choices=["auto", "qwen3_5", "qwen3", "qwen3_vl", "gemma4"])
     ap.add_argument("--thinking-mode", default="off", choices=["auto", "on", "off"])
-    ap.add_argument("--run-name", default=DEFAULT_RUN_NAME)
-    ap.add_argument("--save-root", default=DEFAULT_SAVE_REL)
+    ap.add_argument("--run-name", default=None)
+    ap.add_argument("--save-root", default=None)
     ap.add_argument("--total-qa-pairs", type=int, default=TEXT_TOTAL_QA_PAIRS)
+    ap.add_argument(
+        "--source-counts",
+        default=None,
+        help=(
+            "Smoke-run exact counts, for example "
+            "dapo=20,triviaqa=20,apigen-mt-5k=20. "
+            "Omit this for the formal full text-only recipe."
+        ),
+    )
     ap.add_argument("--max-model-len", type=int, default=32768)
     ap.add_argument("--gpu-memory-utilization", type=float, default=0.90)
     ap.add_argument("--tensor-parallel-size", type=int, default=1)
@@ -225,6 +281,16 @@ def main() -> None:
     data_root = resolve_from_code_root(args.data_root)
     ensure_mhlc_data_layout(data_root)
     set_hf_dirs_inside_data_root(data_root)
+    source_counts = parse_source_counts(args.source_counts)
+    if source_counts is not None:
+        args.total_qa_pairs = sum(source_counts.values())
+    if args.run_name is None:
+        if source_counts is None:
+            args.run_name = DEFAULT_RUN_NAME
+        else:
+            args.run_name = f"Qwen3_VL_4B_Instruct_text_only_smoke_{args.total_qa_pairs}"
+    if args.save_root is None:
+        args.save_root = f"../mhlc_data/data/train/Qwen3VL/{args.run_name}"
 
     model_path = resolve_from_code_root(args.model_path)
     save_root = resolve_from_code_root(args.save_root)
@@ -236,6 +302,8 @@ def main() -> None:
         "mhlc_upstream_combined_all_datagen_multimodel",
     )
     patch_text_only_sources(module)
+    if source_counts is not None:
+        patch_exact_source_counts(module, source_counts)
     patch_source_loader(module, data_root, allow_hf_fallback=bool(args.allow_hf_fallback))
     patch_generation_progress(module)
 
@@ -268,7 +336,9 @@ def main() -> None:
     ]
 
     print("[stage] capability raw generation")
-    print(f"[sources] text_only={dict(TEXT_SOURCE_COUNTS)} total={args.total_qa_pairs}")
+    print(f"[sources] text_only={dict(module.SOURCE_PORTIONS)} total={args.total_qa_pairs}")
+    if source_counts is not None:
+        print("[mode] smoke source counts override is active; omit --source-counts for formal full run")
     print(f"[model] {rel(model_path)}")
     print(f"[output] {rel(save_root)}")
     with temporary_argv(argv):

@@ -21,6 +21,7 @@ def main() -> None:
     ap.add_argument("--output-path", default="../mhlc_data/eval_outputs/when2call/Qwen3-VL-4B-Instruct/when2call_test_generated_4class.parquet")
     ap.add_argument("--model-family", default="qwen3_vl", choices=["auto", "qwen3_5", "qwen3", "qwen3_vl", "gemma4"])
     ap.add_argument("--thinking-mode", default="off")
+    ap.add_argument("--max-eval-rows", type=int, default=None, help="Smoke-run eval row cap. Omit for the formal full run.")
     ap.add_argument("--batch-size", type=int, default=64)
     ap.add_argument("--max-tokens", type=int, default=16000)
     ap.add_argument("--gpu-memory-utilization", type=float, default=0.50)
@@ -85,6 +86,10 @@ def main() -> None:
         "test",
         "--eval_split",
         "mcq",
+    ]
+    if args.max_eval_rows is not None:
+        argv.extend(["--max_eval_rows", str(args.max_eval_rows)])
+    argv.extend([
         "--batch_size",
         str(args.batch_size),
         "--max_tokens",
@@ -101,11 +106,13 @@ def main() -> None:
         rel(output_path),
         "--also_write_jsonl",
         "true",
-    ]
+    ])
 
     print("[stage] optional when2call eval completion generation")
     print(f"[model] {rel(model_path)}")
     print(f"[output] {rel(output_path)}")
+    if args.max_eval_rows is not None:
+        print(f"[mode] smoke max_eval_rows={args.max_eval_rows}; omit it for formal full run")
     with temporary_argv(argv):
         module.main()
 
