@@ -22,7 +22,7 @@ DEFAULT_BASELINE_HEAD = (
     "../mhlc_data/trained_models/baseline_capability_heads/"
     "Qwen__Qwen3-VL-4B-Instruct/full/capability_head.pt"
 )
-DEFAULT_JUDGE_MODEL = "Qwen/Qwen3-VL-8B-Instruct"
+DEFAULT_JUDGE_MODEL = ""
 
 
 def parse_args() -> argparse.Namespace:
@@ -70,7 +70,11 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--score-batch-size", type=int, default=1)
     parser.add_argument("--m2-input-cost-per-1m-usd", type=float, default=0.70)
     parser.add_argument("--m2-output-cost-per-1m-usd", type=float, default=8.40)
-    parser.add_argument("--judge-model-path", default=DEFAULT_JUDGE_MODEL)
+    parser.add_argument(
+        "--judge-model-path",
+        default=DEFAULT_JUDGE_MODEL,
+        help="Optional judge model for textbench fallback grading. Empty string disables judge loading.",
+    )
     parser.add_argument("--judge-model-family", default="auto", choices=["auto", "qwen3_5", "qwen3", "qwen3_vl", "gemma4", "other"])
     parser.add_argument("--judge-thinking-mode", default="auto", choices=["auto", "on", "off"])
     parser.add_argument("--judge-batch-size", type=int, default=16)

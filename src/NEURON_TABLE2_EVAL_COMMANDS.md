@@ -168,6 +168,12 @@ triviaqa/routed_ours/results_scored.jsonl
 ## 计算口径
 
 `score` 使用原项目 evaluator 对 `triviaqa/math/mmlu_pro` 的 `accuracy`。
+默认不加载额外 judge 模型，原项目 evaluator 会先用 direct parser / exact match 计算可解析样本。
+如果要启用 judge fallback，再显式传：
+
+```bash
+--judge-model-path ../Qwen/Qwen3-VL-8B-Instruct
+```
 
 `cost` 公式：
 
