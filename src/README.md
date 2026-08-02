@@ -1,5 +1,27 @@
 # MHLC Pre-Training Data Pipeline
 
+## 0. 先下载原项目发布的 baseline Capability Head 权重
+
+作者发布的 Capability Head 权重都比较小，推荐实验开始先一次性全部下载：
+
+```bash
+cd mhlc_code
+python src/13_download_baseline_capability_head.py --all
+```
+
+默认输出到：
+
+```text
+mhlc_data/trained_models/baseline_capability_heads/
+```
+
+只想先确认会下载哪些 repo，不真正下载：
+
+```bash
+cd mhlc_code
+python src/13_download_baseline_capability_head.py --all --dry-run
+```
+
 这些脚本只处理“训练前”的数据阶段，不训练 head，也不改动
 `Multi-Head-Latent-Control/` 原仓库。
 
@@ -87,9 +109,16 @@ python src/01_download_data.py --group benchmarks \
   --mmlu-pro-csv ../paper_snapshots/test.csv
 ```
 
-原仓库没有提供这两个 CSV，也没有提供它们的 preparation scripts；没有 paper
-snapshot 时不用运行这条命令。默认 `--group benchmarks` 只物料化可下载的
-HF-backed 文本 benchmark 数据。
+原仓库没有提供这两个 CSV，也没有提供它们的 preparation scripts。现在默认 `--group all`
+或 `--group benchmarks` 会从公开 Hugging Face benchmark 各抽 1000 条生成兼容 CSV：
+
+```text
+mhlc_data/data/benchmarks/merged_math.csv
+mhlc_data/data/benchmarks/test.csv
+```
+
+这两个公开版 CSV 可用于跑 baseline，但不是作者 paper snapshot。需要严格复现作者表格时，仍然优先传入作者原始 CSV。
+公开版默认 `--csv-benchmark-sample-size 1000 --csv-benchmark-seed 42`，需要固定别的抽样规模或 seed 时显式传参。
 
 ## 2. Capability Head: 生成 raw completion 数据
 

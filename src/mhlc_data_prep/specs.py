@@ -52,6 +52,25 @@ CSV_BENCHMARK_TARGETS = {
 }
 
 
+PUBLIC_CSV_BENCHMARK_SOURCES: dict[str, dict[str, Any]] = {
+    "math": {
+        "target_file": CSV_BENCHMARK_TARGETS["math"],
+        "sample_size": 1000,
+        "candidates": [
+            {"dataset_id": "hendrycks/competition_math", "dataset_config": None, "split": "test"},
+            {"dataset_id": "qwedsacf/competition_math", "dataset_config": None, "split": "test"},
+        ],
+    },
+    "mmlu_pro": {
+        "target_file": CSV_BENCHMARK_TARGETS["mmlu_pro"],
+        "sample_size": 1000,
+        "candidates": [
+            {"dataset_id": "TIGER-Lab/MMLU-Pro", "dataset_config": None, "split": "test"},
+        ],
+    },
+}
+
+
 WHEN2CALL_REPO = "nvidia/When2Call"
 WHEN2CALL_CONFIGS = ["train_sft", "train_pref", "test"]
 
