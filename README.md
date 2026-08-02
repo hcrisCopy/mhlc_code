@@ -12,6 +12,8 @@ mhlc_data
 Qwen
     Qwen3-VL-4B-Instruct
     Qwen3-VL-32B-Thinking-FP8
+    Qwen3-VL-30B-A3B-Instruct-FP8
+    Qwen3-30B-A3B-Instruct-2507-FP8
 环境配置
 conda create -n mhlc python=3.10 -y
 conda activate mhlc
@@ -30,3 +32,12 @@ modelscope download --model Qwen/Qwen3-VL-4B-Instruct \
 
 modelscope download --model Qwen/Qwen3-VL-32B-Thinking-FP8 \
   --local_dir ../Qwen/Qwen3-VL-32B-Thinking-FP8
+
+mkdir -p ../Qwen/Qwen3-VL-30B-A3B-Instruct-FP8
+mkdir -p ../Qwen/Qwen3-30B-A3B-Instruct-2507-FP8
+
+modelscope download --model Qwen/Qwen3-VL-30B-A3B-Instruct-FP8 \
+  --local_dir ../Qwen/Qwen3-VL-30B-A3B-Instruct-FP8
+
+modelscope download --model Qwen/Qwen3-30B-A3B-Instruct-2507-FP8 \
+  --local_dir ../Qwen/Qwen3-30B-A3B-Instruct-2507-FP8
