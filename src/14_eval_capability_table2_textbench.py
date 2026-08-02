@@ -59,6 +59,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--baseline-hidden-layer-selection", default="last")
     parser.add_argument("--vllm-dtype", default="bfloat16")
     parser.add_argument("--vllm-max-model-len", type=int, default=32000)
+    parser.add_argument("--vllm-enforce-eager", action="store_true")
     parser.add_argument("--model1-gpu-memory-utilization", type=float, default=0.70)
     parser.add_argument("--model2-gpu-memory-utilization", type=float, default=0.80)
     parser.add_argument("--model1-max-num-seqs", type=int, default=32)
@@ -248,7 +249,7 @@ def _runtime_profile(args: argparse.Namespace, slot: str) -> dict[str, Any]:
         "tensor_parallel_size": 1,
         "gpu_memory_utilization": gpu_util,
         "max_num_seqs": max_num_seqs,
-        "enforce_eager": False,
+        "enforce_eager": bool(args.vllm_enforce_eager),
         "trust_remote_code": bool(args.trust_remote_code),
         "limit_mm_images": 1,
         "model_family": str(model_family),

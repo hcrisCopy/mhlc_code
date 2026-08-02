@@ -93,8 +93,8 @@ python src/14_eval_capability_table2_textbench.py \
   --model1-max-num-seqs 1 \
   --model2-max-num-seqs 1 \
   --score-batch-size 1 \
-  --model1-gpu-memory-utilization 0.45 \
-  --model2-gpu-memory-utilization 0.45 \
+  --model1-gpu-memory-utilization 0.70 \
+  --model2-gpu-memory-utilization 0.70 \
   --output-dir ../mhlc_data/eval_outputs/neuron_heads/Qwen3-VL-4B-Instruct/capability_table2_textbench_smoke
 ```
 
@@ -102,6 +102,12 @@ python src/14_eval_capability_table2_textbench.py \
 
 ```bash
 --benchmarks triviaqa
+```
+
+如果仍然在 vLLM CUDA graph 初始化阶段显存不够，再额外加：
+
+```bash
+--vllm-enforce-eager
 ```
 
 如果你用的是原项目自己训练保存的文件名，也可以传：
