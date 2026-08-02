@@ -212,7 +212,10 @@ python src/04_prepare_when2call_labels.py \
   --output-dir ../mhlc_data/data/train/when2call/when2call_processed_4class_smoke \
   --max-rows-per-split 20 \
   --random-sample \
-  --batch-size 8
+  --batch-size 4 \
+  --gpu-memory-utilization 0.70 \
+  --max-model-len 16000 \
+  --max-tokens 4096
 ```
 
 正式复现时只把 `--annotator-model-id` 和 `--tokenizer-id` 改回 30B annotator

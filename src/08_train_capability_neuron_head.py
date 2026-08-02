@@ -20,7 +20,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--model-family", default="auto")
     parser.add_argument("--thinking-mode", default="auto")
     parser.add_argument("--trust-remote-code", action=argparse.BooleanOptionalAction, default=True)
-    parser.add_argument("--attn-implementation", default="flash_attention_2")
+    parser.add_argument("--attn-implementation", default="sdpa")
     parser.add_argument("--prefer-unsloth-mirror", action="store_true")
     parser.add_argument("--load-in-4bit", action="store_true")
     parser.add_argument("--load-in-8bit", action="store_true")

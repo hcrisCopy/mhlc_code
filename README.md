@@ -17,10 +17,12 @@ Qwen
 环境配置
 conda create -n mhlc python=3.10 -y
 conda activate mhlc
-
+conda install -y -c conda-forge libstdcxx-ng libgcc-ng sqlite icu
 pip install -U pip
 pip install torch==2.8.0 torchvision==0.23.0 torchaudio==2.8.0 --index-url https://download.pytorch.org/whl/cu128
 pip install -r requirements.txt
+export LD_PRELOAD="$CONDA_PREFIX/lib/libstdc++.so.6"
+export LD_LIBRARY_PATH="$CONDA_PREFIX/lib:${LD_LIBRARY_PATH:-}"
 
 说明：Qwen3-VL 需要新版 transformers / vLLM。torch 需要按服务器驱动选择 CUDA wheel；如果 `nvidia-smi` 只支持 CUDA 12.6，把上面的 `cu128` 改成 `cu126`。不要再用旧的 `torch==2.6.0`。
 模型与数据准备

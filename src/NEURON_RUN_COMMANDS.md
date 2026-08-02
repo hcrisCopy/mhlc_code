@@ -18,7 +18,8 @@ cd mhlc_code
 
 ```bash
 python src/07_probe_capability_neurons.py \
-  --model-path ../Qwen/Qwen3-VL-4B-Instruct
+  --model-path ../Qwen/Qwen3-VL-4B-Instruct \
+  --attn-implementation sdpa
 ```
 
 输出：
@@ -32,7 +33,8 @@ python src/07_probe_capability_neurons.py \
 
 ```bash
 python src/08_train_capability_neuron_head.py \
-  --model-path ../Qwen/Qwen3-VL-4B-Instruct
+  --model-path ../Qwen/Qwen3-VL-4B-Instruct \
+  --attn-implementation sdpa
 ```
 
 输出：
@@ -52,7 +54,8 @@ python src/08_train_capability_neuron_head.py \
 
 ```bash
 python src/09_probe_resolution_neurons.py \
-  --model-path ../Qwen/Qwen3-VL-4B-Instruct
+  --model-path ../Qwen/Qwen3-VL-4B-Instruct \
+  --attn-implementation sdpa
 ```
 
 输出：
@@ -66,7 +69,8 @@ python src/09_probe_resolution_neurons.py \
 
 ```bash
 python src/10_train_resolution_neuron_head.py \
-  --model-path ../Qwen/Qwen3-VL-4B-Instruct
+  --model-path ../Qwen/Qwen3-VL-4B-Instruct \
+  --attn-implementation sdpa
 ```
 
 输出：
@@ -84,7 +88,59 @@ python src/10_train_resolution_neuron_head.py \
 
 ## 跑通小样本
 
-只想先确认流程时，加 `--max-samples`：
+如果前面数据准备阶段按 `src/README.md` 的 4090 单卡 smoke 命令跑过，直接复用 smoke 产物，不需要再加 `--max-samples`。
+
+Capability smoke 产物：
+
+```text
+../mhlc_data/data/train/Qwen3VL/Qwen3_VL_4B_Instruct_text_only_smoke_60/verified
+```
+
+直接接神经元探测和训练：
+
+```bash
+python src/07_probe_capability_neurons.py \
+  --model-path ../Qwen/Qwen3-VL-4B-Instruct \
+  --dataset-path ../mhlc_data/data/train/Qwen3VL/Qwen3_VL_4B_Instruct_text_only_smoke_60/verified \
+  --attn-implementation sdpa \
+  --max-seq-len 16000 \
+  --batch-size 1
+
+python src/08_train_capability_neuron_head.py \
+  --model-path ../Qwen/Qwen3-VL-4B-Instruct \
+  --dataset-path ../mhlc_data/data/train/Qwen3VL/Qwen3_VL_4B_Instruct_text_only_smoke_60/verified \
+  --attn-implementation sdpa \
+  --max-seq-len 16000 \
+  --extract-batch-size 1 \
+  --train-batch-size 16
+```
+
+Resolution smoke 产物：
+
+```text
+../mhlc_data/data/train/when2call/qwen3vl/Qwen3-VL-4B-Instruct_4class_smoke
+```
+
+直接接神经元探测和训练：
+
+```bash
+python src/09_probe_resolution_neurons.py \
+  --model-path ../Qwen/Qwen3-VL-4B-Instruct \
+  --dataset-path ../mhlc_data/data/train/when2call/qwen3vl/Qwen3-VL-4B-Instruct_4class_smoke \
+  --attn-implementation sdpa \
+  --max-seq-len 16000 \
+  --batch-size 1
+
+python src/10_train_resolution_neuron_head.py \
+  --model-path ../Qwen/Qwen3-VL-4B-Instruct \
+  --dataset-path ../mhlc_data/data/train/when2call/qwen3vl/Qwen3-VL-4B-Instruct_4class_smoke \
+  --attn-implementation sdpa \
+  --max-seq-len 16000 \
+  --extract-batch-size 1 \
+  --train-batch-size 16
+```
+
+如果不是读 smoke 目录，而是读全量目录但只想抽样确认流程，再加 `--max-samples`：
 
 ```bash
 python src/07_probe_capability_neurons.py \
@@ -131,4 +187,3 @@ python src/07_probe_capability_neurons.py \
   --model-path ../Qwen/Qwen3-VL-4B-Instruct \
   --clean
 ```
-

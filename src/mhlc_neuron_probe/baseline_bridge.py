@@ -65,7 +65,7 @@ def load_frozen_backbone(
     model_family: str = "auto",
     thinking_mode: str = "auto",
     trust_remote_code: bool = True,
-    attn_implementation: str = "flash_attention_2",
+    attn_implementation: str = "sdpa",
     prefer_unsloth_mirror: bool = False,
     load_in_4bit: bool = False,
     load_in_8bit: bool = False,
@@ -171,4 +171,3 @@ def build_forward_inputs(batch: dict[str, Any], model_family: str) -> dict[str, 
             continue
         out[key] = value
     return out
-
