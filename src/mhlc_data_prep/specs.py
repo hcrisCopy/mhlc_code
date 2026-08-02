@@ -57,8 +57,19 @@ PUBLIC_CSV_BENCHMARK_SOURCES: dict[str, dict[str, Any]] = {
         "target_file": CSV_BENCHMARK_TARGETS["math"],
         "sample_size": 1000,
         "candidates": [
-            {"dataset_id": "hendrycks/competition_math", "dataset_config": None, "split": "test"},
-            {"dataset_id": "qwedsacf/competition_math", "dataset_config": None, "split": "test"},
+            {
+                "dataset_id": "EleutherAI/hendrycks_math",
+                "dataset_configs": [
+                    "algebra",
+                    "counting_and_probability",
+                    "geometry",
+                    "intermediate_algebra",
+                    "number_theory",
+                    "prealgebra",
+                    "precalculus",
+                ],
+                "split": "test",
+            },
         ],
     },
     "mmlu_pro": {

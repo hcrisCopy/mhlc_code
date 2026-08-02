@@ -119,6 +119,8 @@ mhlc_data/data/benchmarks/test.csv
 
 这两个公开版 CSV 可用于跑 baseline，但不是作者 paper snapshot。需要严格复现作者表格时，仍然优先传入作者原始 CSV。
 公开版默认 `--csv-benchmark-sample-size 1000 --csv-benchmark-seed 42`，需要固定别的抽样规模或 seed 时显式传参。
+其中 `math` 严格使用 `EleutherAI/hendrycks_math` 的 `test` split，合并 7 个数学类别 config 后抽样生成 `merged_math.csv`；不会退到 train split。
+`mmlu_pro` 使用 `TIGER-Lab/MMLU-Pro` 的 `test` split。
 
 ## 2. Capability Head: 生成 raw completion 数据
 

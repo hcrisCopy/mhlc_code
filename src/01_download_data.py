@@ -157,21 +157,46 @@ def _mmlu_answer_letter(row: dict[str, Any], options: list[str]) -> str:
 
 
 def _load_public_csv_benchmark_dataset(name: str, cache_dir: Path):
-    from datasets import load_dataset
+    from datasets import concatenate_datasets, load_dataset
 
     errors = []
     for cfg in PUBLIC_CSV_BENCHMARK_SOURCES[name]["candidates"]:
         dataset_id = cfg["dataset_id"]
+        dataset_configs = cfg.get("dataset_configs")
         dataset_config = cfg.get("dataset_config")
-        split = cfg["split"]
+        configured_split = cfg["split"]
+        if dataset_configs:
+            loaded_parts = []
+            used_configs = []
+            for one_config in dataset_configs:
+                loaded = False
+                try:
+                    part = load_dataset(dataset_id, one_config, split=configured_split, cache_dir=str(cache_dir))
+                    loaded_parts.append(part)
+                    used_configs.append({"config": one_config, "split": configured_split})
+                    loaded = True
+                except Exception as exc:
+                    errors.append(f"{dataset_id}/{one_config}/{configured_split}: {type(exc).__name__}: {exc}")
+                if not loaded:
+                    errors.append(f"{dataset_id}/{one_config}: configured split {configured_split!r} could not be loaded")
+            if loaded_parts:
+                resolved_cfg = dict(cfg)
+                resolved_cfg["dataset_config"] = ",".join(str(item["config"]) for item in used_configs)
+                resolved_cfg["split"] = ",".join(sorted({str(item["split"]) for item in used_configs}))
+                resolved_cfg["loaded_configs"] = used_configs
+                return concatenate_datasets(loaded_parts), resolved_cfg
+            continue
+
         try:
             if dataset_config:
-                ds = load_dataset(dataset_id, dataset_config, split=split, cache_dir=str(cache_dir))
+                ds = load_dataset(dataset_id, dataset_config, split=configured_split, cache_dir=str(cache_dir))
             else:
-                ds = load_dataset(dataset_id, split=split, cache_dir=str(cache_dir))
-            return ds, cfg
+                ds = load_dataset(dataset_id, split=configured_split, cache_dir=str(cache_dir))
+            resolved_cfg = dict(cfg)
+            resolved_cfg["split"] = configured_split
+            return ds, resolved_cfg
         except Exception as exc:
-            errors.append(f"{dataset_id}/{split}: {type(exc).__name__}: {exc}")
+            errors.append(f"{dataset_id}/{configured_split}: {type(exc).__name__}: {exc}")
     joined = "\n  - ".join(errors)
     raise RuntimeError(f"Could not load public fallback for {name}. Tried:\n  - {joined}")
 
