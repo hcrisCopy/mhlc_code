@@ -211,6 +211,7 @@ python src/04_prepare_when2call_labels.py \
   --tokenizer-id ../Qwen/Qwen3-VL-4B-Instruct \
   --output-dir ../mhlc_data/data/train/when2call/when2call_processed_4class_smoke \
   --max-rows-per-split 20 \
+  --random-sample \
   --batch-size 8
 ```
 

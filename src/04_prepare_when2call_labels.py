@@ -22,7 +22,18 @@ def _select_split(ds: Any, split: str):
     return ds
 
 
-def patch_when2call_loader(module: Any, data_root, allow_hf_fallback: bool) -> None:
+def _stable_seed(base_seed: int, name: str) -> int:
+    return int(base_seed) + sum((idx + 1) * ord(ch) for idx, ch in enumerate(name))
+
+
+def patch_when2call_loader(
+    module: Any,
+    data_root,
+    allow_hf_fallback: bool,
+    *,
+    random_sample: bool,
+    seed: int,
+) -> None:
     original_load_dataset = module.load_dataset
     local_root = data_root / "data" / "sources" / "when2call"
 
@@ -31,7 +42,10 @@ def patch_when2call_loader(module: Any, data_root, allow_hf_fallback: bool) -> N
             local_dir = local_root / str(name)
             if local_dir.exists():
                 split = kwargs.get("split", "train")
-                return _select_split(load_from_disk(str(local_dir)), split)
+                ds = _select_split(load_from_disk(str(local_dir)), split)
+                if random_sample and len(ds) > 0:
+                    ds = ds.shuffle(seed=_stable_seed(seed, str(name)))
+                return ds
             if not allow_hf_fallback:
                 raise FileNotFoundError(
                     f"Missing materialized When2Call split {name}: {rel(local_dir)}\n"
@@ -56,6 +70,11 @@ def main() -> None:
         default=None,
         help="Smoke-run row cap for each upstream When2Call split. Omit for the formal full run.",
     )
+    ap.add_argument(
+        "--random-sample",
+        action="store_true",
+        help="Shuffle each local When2Call split before applying --max-rows-per-split.",
+    )
     ap.add_argument("--batch-size", type=int, default=256)
     ap.add_argument("--max-tokens", type=int, default=16000)
     ap.add_argument("--gpu-memory-utilization", type=float, default=0.50)
@@ -78,7 +97,13 @@ def main() -> None:
         "when2call/when2call_build_head_labels_4class.py",
         "mhlc_upstream_when2call_build_head_labels_4class",
     )
-    patch_when2call_loader(module, data_root, allow_hf_fallback=bool(args.allow_hf_fallback))
+    patch_when2call_loader(
+        module,
+        data_root,
+        allow_hf_fallback=bool(args.allow_hf_fallback),
+        random_sample=bool(args.random_sample and args.max_rows_per_split is not None),
+        seed=int(args.seed),
+    )
 
     argv = [
         "when2call_build_head_labels_4class.py",
@@ -118,6 +143,8 @@ def main() -> None:
     print(f"[annotator] {args.annotator_model_id}")
     if args.max_rows_per_split is not None:
         print(f"[mode] smoke max_rows_per_split={args.max_rows_per_split}; omit it for formal full run")
+        if args.random_sample:
+            print(f"[mode] random sampling enabled with seed={args.seed}")
     with temporary_argv(argv):
         module.main()
 
