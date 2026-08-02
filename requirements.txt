@@ -1,23 +1,31 @@
-# Install a CUDA-compatible PyTorch build separately before this file.
-datasets
-fastapi
-huggingface-hub
-matplotlib
-numpy
-pandas
-pillow
-pyarrow
-PyYAML
-qwen-vl-utils
-requests
-scikit-learn
-tqdm
-transformers
-unsloth
-uvicorn
-vllm
-wandb
+# Install PyTorch first:
+# pip install torch==2.6.0 torchvision==0.21.0 torchaudio==2.6.0 --index-url https://download.pytorch.org/whl/cu124
+#
+# This file is pinned for the torch 2.6.0 + CUDA 12.4 stack.
+# Keep torch / torchvision / torchaudio out of this file so the CUDA wheel
+# selected above is preserved.
 
-# Optional math evaluators:
-# latex2sympy2-extended
-# math-verify
+datasets==3.6.0
+fastapi==0.115.12
+huggingface-hub==0.31.4
+matplotlib==3.10.3
+numpy==2.2.6
+pandas==2.2.3
+pillow==11.2.1
+pyarrow==20.0.0
+PyYAML==6.0.2
+qwen-vl-utils==0.0.11
+requests==2.32.3
+scikit-learn==1.6.1
+tqdm==4.67.1
+transformers==4.51.3
+unsloth==2025.5.8
+unsloth_zoo==2025.5.10
+uvicorn==0.34.2
+vllm==0.8.5.post1
+wandb==0.19.11
+xformers==0.0.29.post2; platform_system == "Linux" and platform_machine == "x86_64"
+
+# Math verification used by combined_all_labeling_multimodel.py.
+latex2sympy2-extended==1.10.2
+math-verify==0.8.0
