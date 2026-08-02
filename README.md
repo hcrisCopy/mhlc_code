@@ -35,6 +35,10 @@ mkdir -p ../Qwen/Qwen3-VL-32B-Thinking-FP8
 modelscope download --model Qwen/Qwen3-VL-4B-Instruct \
   --local_dir ../Qwen/Qwen3-VL-4B-Instruct
 
+modelscope download \
+  --model Qwen/Qwen3-VL-8B-Instruct \
+  --local_dir ../Qwen/Qwen3-VL-8B-Instruct
+
 modelscope download --model Qwen/Qwen3-VL-32B-Thinking-FP8 \
   --local_dir ../Qwen/Qwen3-VL-32B-Thinking-FP8
 

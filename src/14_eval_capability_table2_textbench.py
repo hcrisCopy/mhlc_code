@@ -22,6 +22,7 @@ DEFAULT_BASELINE_HEAD = (
     "../mhlc_data/trained_models/baseline_capability_heads/"
     "Qwen__Qwen3-VL-4B-Instruct/full/capability_head.pt"
 )
+DEFAULT_JUDGE_MODEL = "Qwen/Qwen3-VL-8B-Instruct"
 
 
 def parse_args() -> argparse.Namespace:
@@ -69,7 +70,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--score-batch-size", type=int, default=1)
     parser.add_argument("--m2-input-cost-per-1m-usd", type=float, default=0.70)
     parser.add_argument("--m2-output-cost-per-1m-usd", type=float, default=8.40)
-    parser.add_argument("--judge-model-path", default="")
+    parser.add_argument("--judge-model-path", default=DEFAULT_JUDGE_MODEL)
     parser.add_argument("--judge-model-family", default="auto", choices=["auto", "qwen3_5", "qwen3", "qwen3_vl", "gemma4", "other"])
     parser.add_argument("--judge-thinking-mode", default="auto", choices=["auto", "on", "off"])
     parser.add_argument("--judge-batch-size", type=int, default=16)
@@ -395,10 +396,10 @@ def _score_mhlc_head(
     benchmark: str,
     examples: list[dict[str, Any]],
     m1_rows: list[dict[str, Any]],
+    baseline_head_path: Path,
     out_path: Path,
     reuse: bool,
 ) -> list[dict[str, Any]]:
-    baseline_head_path = _resolve_baseline_head_path(args, data_root)
     scores_by_key = _rows_by_key(out_path) if reuse else {}
     valid_by_key = {
         key: row
@@ -754,7 +755,7 @@ def main() -> None:
     dirs = output_dirs(data_root, tag, "capability")
     ours_head_path = dirs["trained"] / "neuron_head_final.pt" if args.ours_head_checkpoint_path is None else resolve_from_code_root(args.ours_head_checkpoint_path)
     ours_neuron_path = dirs["neurons"] / "selected_neurons.jsonl" if args.ours_neuron_path is None else resolve_from_code_root(args.ours_neuron_path)
-    baseline_head_path = resolve_from_code_root(args.baseline_head_path)
+    baseline_head_path = _resolve_baseline_head_path(args, data_root)
     output_dir = (
         data_root / "eval_outputs" / "neuron_heads" / tag / "capability_table2_textbench"
         if args.output_dir is None else resolve_from_code_root(args.output_dir)
@@ -793,6 +794,10 @@ def main() -> None:
         "baseline_head_path": rel(baseline_head_path),
         "ours_head_checkpoint_path": rel(ours_head_path),
         "ours_neuron_path": rel(ours_neuron_path),
+        "judge_model_path": args.judge_model_path,
+        "judge_model_family": args.judge_model_family,
+        "judge_thinking_mode": args.judge_thinking_mode,
+        "judge_batch_size": int(args.judge_batch_size),
         "m2_input_cost_per_1m_usd": float(args.m2_input_cost_per_1m_usd),
         "m2_output_cost_per_1m_usd": float(args.m2_output_cost_per_1m_usd),
         "cost_note": "Paid cost counts only model2 generation tokens. Model1 and head scoring are treated as local/free, matching Table 2 convention.",
@@ -800,20 +805,24 @@ def main() -> None:
 
     judge_runtime = None
     judge_sampling = None
-    if str(args.judge_model_path).strip():
+    if str(args.judge_model_path).strip() and any(shared.benchmark_needs_judge(benchmark) for benchmark in benchmarks):
         judge_profile = {
-            "dtype": str(args.vllm_dtype),
-            "max_model_len": int(args.vllm_max_model_len),
+            "dtype": "bfloat16",
+            "max_model_len": 8192,
             "tensor_parallel_size": 1,
-            "gpu_memory_utilization": 0.60,
-            "max_num_seqs": max(1, int(args.judge_batch_size)),
+            "gpu_memory_utilization": 0.40,
+            "max_num_seqs": 32,
             "enforce_eager": False,
-            "trust_remote_code": bool(args.trust_remote_code),
+            "trust_remote_code": True,
         }
         judge_runtime, judge_sampling = shared.build_judge_runtime_and_sampling(
             judge_model_name_or_path=str(args.judge_model_path),
             judge_runtime_profile=judge_profile,
-            judge_sampling_profiles=generate_mod.AUX_EVAL_JUDGE_SAMPLING_PROFILES,
+            judge_sampling_profiles={
+                "default": eval_mod.JUDGE_DEFAULT_SAMPLING_PROFILE,
+                "thinking": eval_mod.JUDGE_THINKING_SAMPLING_PROFILE,
+                "instruct": eval_mod.JUDGE_INSTRUCT_SAMPLING_PROFILE,
+            },
             judge_model_family=str(args.judge_model_family),
             judge_thinking_mode=str(args.judge_thinking_mode),
         )
@@ -859,6 +868,7 @@ def main() -> None:
                 benchmark=benchmark,
                 examples=examples,
                 m1_rows=m1_rows,
+                baseline_head_path=baseline_head_path,
                 out_path=bench_dir / "head_scores_mhlc.jsonl",
                 reuse=bool(args.reuse_scores),
             )
