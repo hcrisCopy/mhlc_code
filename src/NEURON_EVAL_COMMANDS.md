@@ -123,7 +123,12 @@ python src/06_generate_when2call_eval_completions.py \
   --model-path ../Qwen/Qwen3-VL-4B-Instruct \
   --output-path ../mhlc_data/eval_outputs/when2call/Qwen3-VL-4B-Instruct/when2call_test_generated_4class_smoke.parquet \
   --max-eval-rows 20 \
-  --batch-size 8
+  --batch-size 1 \
+  --max-model-len 16000 \
+  --max-tokens 2048 \
+  --gpu-memory-utilization 0.70 \
+  --max-num-seqs 1 \
+  --enforce-eager
 ```
 
 4090 单卡 smoke 评测：

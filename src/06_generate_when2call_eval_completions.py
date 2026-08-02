@@ -3,8 +3,6 @@ from __future__ import annotations
 
 import argparse
 
-from datasets import DatasetDict, load_from_disk
-
 from mhlc_data_prep.original import load_upstream_module
 from mhlc_data_prep.paths import ensure_mhlc_data_layout, resolve_from_code_root, set_hf_dirs_inside_data_root
 from mhlc_data_prep.run_utils import clean_path, rel, temporary_argv
@@ -27,10 +25,13 @@ def main() -> None:
     ap.add_argument("--gpu-memory-utilization", type=float, default=0.50)
     ap.add_argument("--tensor-parallel-size", type=int, default=1)
     ap.add_argument("--max-model-len", type=int, default=32000)
+    ap.add_argument("--max-num-seqs", type=int, default=None)
+    ap.add_argument("--enforce-eager", action="store_true")
     ap.add_argument("--seed", type=int, default=42)
     ap.add_argument("--allow-hf-fallback", action="store_true")
     ap.add_argument("--clean", action="store_true", help="Remove existing eval completion outputs before generating.")
     args = ap.parse_args()
+    from datasets import DatasetDict, load_from_disk
 
     data_root = resolve_from_code_root(args.data_root)
     ensure_mhlc_data_layout(data_root)
@@ -69,6 +70,16 @@ def main() -> None:
         return original_load_dataset(path, name, *load_args, **kwargs)
 
     module.load_dataset = local_load_dataset
+    original_llm = module.LLM
+
+    def patched_llm(*llm_args, **llm_kwargs):
+        if args.max_num_seqs is not None:
+            llm_kwargs.setdefault("max_num_seqs", int(args.max_num_seqs))
+        if args.enforce_eager:
+            llm_kwargs.setdefault("enforce_eager", True)
+        return original_llm(*llm_args, **llm_kwargs)
+
+    module.LLM = patched_llm
 
     argv = [
         "generate_when2call_eval_completions_4class.py",
