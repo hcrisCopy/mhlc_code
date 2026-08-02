@@ -23,7 +23,7 @@ benchmark 数据：
 原作者 Capability Head：
 
 ```text
-../mhlc_data/trained_models/baseline_capability_heads/Qwen__Qwen3-VL-4B-Instruct/full/aux_head_final.pt
+../mhlc_data/trained_models/baseline_capability_heads/Qwen__Qwen3-VL-4B-Instruct/full/capability_head.pt
 ```
 
 我们的神经元 Capability Head：
@@ -56,7 +56,7 @@ python src/01_download_data.py --group benchmarks \
 python src/14_eval_capability_table2_textbench.py \
   --model1-path ../Qwen/Qwen3-VL-4B-Instruct \
   --model2-path ../Qwen/Qwen3-VL-32B-Thinking-FP8 \
-  --baseline-head-path ../mhlc_data/trained_models/baseline_capability_heads/Qwen__Qwen3-VL-4B-Instruct/full/aux_head_final.pt \
+  --baseline-head-path ../mhlc_data/trained_models/baseline_capability_heads/Qwen__Qwen3-VL-4B-Instruct/full/capability_head.pt \
   --attn-implementation sdpa \
   --threshold 0.8 \
   --m2-input-cost-per-1m-usd 0.70 \
@@ -83,7 +83,7 @@ python src/14_eval_capability_table2_textbench.py \
   --model1-path ../Qwen/Qwen3-VL-4B-Instruct \
   --model2-path ../Qwen/Qwen3-VL-4B-Instruct \
   --model2-thinking-mode off \
-  --baseline-head-path ../mhlc_data/trained_models/baseline_capability_heads/Qwen__Qwen3-VL-4B-Instruct/full/aux_head_final.pt \
+  --baseline-head-path ../mhlc_data/trained_models/baseline_capability_heads/Qwen__Qwen3-VL-4B-Instruct/full/capability_head.pt \
   --attn-implementation sdpa \
   --max-samples 2 \
   --vllm-max-model-len 16000 \
@@ -102,6 +102,12 @@ python src/14_eval_capability_table2_textbench.py \
 
 ```bash
 --benchmarks triviaqa
+```
+
+如果你用的是原项目自己训练保存的文件名，也可以传：
+
+```bash
+--baseline-head-path ../some_dir/aux_head_final.pt
 ```
 
 ## 输出位置

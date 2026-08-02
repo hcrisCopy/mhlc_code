@@ -20,7 +20,7 @@ from mhlc_neuron_probe.paper_baselines import format_float
 TEXT_BENCHMARKS = ("triviaqa", "math", "mmlu_pro")
 DEFAULT_BASELINE_HEAD = (
     "../mhlc_data/trained_models/baseline_capability_heads/"
-    "Qwen__Qwen3-VL-4B-Instruct/full/aux_head_final.pt"
+    "Qwen__Qwen3-VL-4B-Instruct/full/capability_head.pt"
 )
 
 
@@ -151,6 +151,84 @@ def _validate_benchmark_inputs(args: argparse.Namespace, benchmarks: Sequence[st
     for benchmark in benchmarks:
         if not paths[benchmark].exists():
             raise FileNotFoundError(f"Missing {benchmark} benchmark data: {rel(paths[benchmark])}")
+
+
+def _candidate_head_files(path: Path) -> list[Path]:
+    if path.is_file():
+        return [path]
+    if not path.exists() or not path.is_dir():
+        return []
+    preferred = [
+        path / "capability_head.pt",
+        path / "aux_head_final.pt",
+    ]
+    files = [p for p in preferred if p.exists()]
+    seen = {p.resolve() for p in files}
+    for pattern in ("capability_head.pt", "aux_head_final.pt", "*.pt"):
+        for p in sorted(path.rglob(pattern)):
+            resolved = p.resolve()
+            if resolved not in seen:
+                files.append(p)
+                seen.add(resolved)
+    return files
+
+
+def _match_score(path: Path, model_path: str) -> tuple[int, int, str]:
+    haystack = str(path).replace("\\", "/").lower()
+    model_name = Path(str(model_path).replace("\\", "/").rstrip("/")).name.lower()
+    compact_haystack = haystack.replace("_", "").replace("-", "").replace(".", "")
+    compact_model = model_name.replace("_", "").replace("-", "").replace(".", "")
+    score = 0
+    if compact_model and compact_model in compact_haystack:
+        score += 100
+    if "full" in haystack:
+        score += 20
+    if path.name == "capability_head.pt":
+        score += 10
+    if path.name == "aux_head_final.pt":
+        score += 5
+    return (-score, len(str(path)), str(path))
+
+
+def _resolve_baseline_head_path(args: argparse.Namespace, data_root: Path) -> Path:
+    requested = resolve_from_code_root(args.baseline_head_path)
+    if requested.exists():
+        candidates = _candidate_head_files(requested)
+        if not candidates:
+            raise FileNotFoundError(f"No .pt file found under baseline head path: {rel(requested)}")
+        chosen = sorted(candidates, key=lambda p: _match_score(p, args.model1_path))[0]
+        if chosen != requested:
+            print(f"[resolve] baseline head directory/file -> {rel(chosen)}", flush=True)
+        return chosen
+
+    if requested.name == "aux_head_final.pt":
+        sibling = requested.with_name("capability_head.pt")
+        if sibling.exists():
+            print(f"[resolve] requested aux_head_final.pt is absent; using downloaded release file: {rel(sibling)}", flush=True)
+            return sibling
+
+    search_roots = [
+        data_root / "trained_models" / "baseline_capability_heads",
+        resolve_from_code_root("Multi-Head-Latent-Control") / "trained_models",
+    ]
+    candidates: list[Path] = []
+    for root in search_roots:
+        candidates.extend(_candidate_head_files(root))
+    if candidates:
+        chosen = sorted(candidates, key=lambda p: _match_score(p, args.model1_path))[0]
+        print(f"[resolve] baseline head path not found: {rel(requested)}", flush=True)
+        print(f"[resolve] using discovered baseline head: {rel(chosen)}", flush=True)
+        return chosen
+
+    raise FileNotFoundError(
+        "Missing original MHLC capability head. Expected a file such as:\n"
+        f"  {rel(requested)}\n"
+        "or the downloaded release file:\n"
+        f"  {rel(requested.with_name('capability_head.pt'))}\n"
+        "Download it with:\n"
+        "  python src/13_download_baseline_capability_head.py "
+        "--model ../Qwen/Qwen3-VL-4B-Instruct --variant full --thinking-mode off"
+    )
 
 
 def _runtime_profile(args: argparse.Namespace, slot: str) -> dict[str, Any]:
@@ -319,7 +397,7 @@ def _score_mhlc_head(
     out_path: Path,
     reuse: bool,
 ) -> list[dict[str, Any]]:
-    baseline_head_path = resolve_from_code_root(args.baseline_head_path)
+    baseline_head_path = _resolve_baseline_head_path(args, data_root)
     scores_by_key = _rows_by_key(out_path) if reuse else {}
     valid_by_key = {
         key: row
@@ -685,8 +763,6 @@ def main() -> None:
         clean_path(output_dir, [data_root], "capability table2 textbench eval output")
     output_dir.mkdir(parents=True, exist_ok=True)
 
-    if not baseline_head_path.exists():
-        raise FileNotFoundError(f"Missing original MHLC capability head: {rel(baseline_head_path)}")
     if not ours_head_path.exists():
         raise FileNotFoundError(f"Missing neuron capability head checkpoint: {rel(ours_head_path)}")
     if not ours_neuron_path.exists():
