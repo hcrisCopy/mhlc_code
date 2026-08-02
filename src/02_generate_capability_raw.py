@@ -14,9 +14,10 @@ from mhlc_data_prep.paths import (
     set_hf_dirs_inside_data_root,
 )
 from mhlc_data_prep.run_utils import clean_path, rel, temporary_argv
+from mhlc_data_prep.specs import TEXT_SOURCE_COUNTS, TEXT_TOTAL_QA_PAIRS
 
 
-DEFAULT_RUN_NAME = "Qwen3_VL_4B_Instruct_hard_Mixed_Sources_120k"
+DEFAULT_RUN_NAME = f"Qwen3_VL_4B_Instruct_text_only_OriginalMixedShare_{TEXT_TOTAL_QA_PAIRS}"
 DEFAULT_SAVE_REL = f"../mhlc_data/data/train/Qwen3VL/{DEFAULT_RUN_NAME}"
 
 
@@ -47,26 +48,6 @@ def patch_source_loader(module: Any, data_root: Path, allow_hf_fallback: bool) -
 
         ds = load_from_disk(str(local_dir))
         ds = _select_split(ds, cfg["split"])
-
-        if cfg.get("streaming", False):
-            if not hasattr(ds, "to_iterable_dataset"):
-                if allow_hf_fallback:
-                    return original_load_source(source_name, source_seed)
-                raise RuntimeError(f"Materialized source cannot be streamed locally: {rel(local_dir)}")
-            # Upstream uses HF streaming plus a bounded shuffle buffer.  We keep
-            # the data materialized under mhlc_data, then replay it as an
-            # IterableDataset with the same buffer size and seed.
-            return ds.to_iterable_dataset().shuffle(
-                seed=source_seed,
-                buffer_size=module.STREAMING_SHUFFLE_BUFFER_SIZE,
-            )
-
-        if (
-            cfg["kind"] == "finevision"
-            and module.MAX_ROWS_SCAN_PER_FINEVISION_SUBSET is not None
-            and module.MAX_ROWS_SCAN_PER_FINEVISION_SUBSET < len(ds)
-        ):
-            ds = ds.select(range(module.MAX_ROWS_SCAN_PER_FINEVISION_SUBSET))
         if len(ds) > 0:
             # Upstream shuffles each loaded source with this same source_seed.
             ds = ds.shuffle(seed=source_seed)
@@ -75,9 +56,19 @@ def patch_source_loader(module: Any, data_root: Path, allow_hf_fallback: bool) -
     module._load_source = local_load_source
 
 
+def patch_text_only_sources(module: Any) -> None:
+    """Keep only the original mixed recipe's text-source allocation."""
+    text_names = list(TEXT_SOURCE_COUNTS)
+    module.SOURCE_PORTIONS = TEXT_SOURCE_COUNTS.copy()
+    module.SOURCE_CONFIGS = {
+        name: module.SOURCE_CONFIGS[name]
+        for name in text_names
+    }
+
+
 def main() -> None:
     ap = argparse.ArgumentParser(
-        description="Generate MHLC Capability Head raw parquet with upstream logic and local materialized sources."
+        description="Generate text-only MHLC Capability Head raw parquet with upstream logic and local materialized sources."
     )
     ap.add_argument("--data-root", default="../mhlc_data")
     ap.add_argument("--model-path", default="../Qwen/Qwen3-VL-4B-Instruct")
@@ -85,7 +76,7 @@ def main() -> None:
     ap.add_argument("--thinking-mode", default="off", choices=["auto", "on", "off"])
     ap.add_argument("--run-name", default=DEFAULT_RUN_NAME)
     ap.add_argument("--save-root", default=DEFAULT_SAVE_REL)
-    ap.add_argument("--total-qa-pairs", type=int, default=120_000)
+    ap.add_argument("--total-qa-pairs", type=int, default=TEXT_TOTAL_QA_PAIRS)
     ap.add_argument("--max-model-len", type=int, default=32768)
     ap.add_argument("--gpu-memory-utilization", type=float, default=0.90)
     ap.add_argument("--tensor-parallel-size", type=int, default=1)
@@ -113,6 +104,7 @@ def main() -> None:
         "combined_all_datagen_multimodel.py",
         "mhlc_upstream_combined_all_datagen_multimodel",
     )
+    patch_text_only_sources(module)
     patch_source_loader(module, data_root, allow_hf_fallback=bool(args.allow_hf_fallback))
 
     argv = [
@@ -144,6 +136,7 @@ def main() -> None:
     ]
 
     print("[stage] capability raw generation")
+    print(f"[sources] text_only={dict(TEXT_SOURCE_COUNTS)} total={args.total_qa_pairs}")
     print(f"[model] {rel(model_path)}")
     print(f"[output] {rel(save_root)}")
     with temporary_argv(argv):

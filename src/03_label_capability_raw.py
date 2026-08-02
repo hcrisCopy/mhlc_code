@@ -6,9 +6,10 @@ import argparse
 from mhlc_data_prep.original import load_upstream_module
 from mhlc_data_prep.paths import ensure_mhlc_data_layout, resolve_from_code_root, set_hf_dirs_inside_data_root
 from mhlc_data_prep.run_utils import clean_path, rel, temporary_argv
+from mhlc_data_prep.specs import TEXT_TOTAL_QA_PAIRS
 
 
-DEFAULT_RUN_NAME = "Qwen3_VL_4B_Instruct_hard_Mixed_Sources_120k"
+DEFAULT_RUN_NAME = f"Qwen3_VL_4B_Instruct_text_only_OriginalMixedShare_{TEXT_TOTAL_QA_PAIRS}"
 DEFAULT_RUN_ROOT = f"../mhlc_data/data/train/Qwen3VL/{DEFAULT_RUN_NAME}"
 
 

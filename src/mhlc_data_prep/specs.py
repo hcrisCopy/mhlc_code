@@ -5,8 +5,9 @@ from math import floor
 from typing import Any
 
 
-# Mirrors SOURCE_PORTIONS in upstream combined_all_datagen_multimodel.py.
-SOURCE_PORTIONS: "OrderedDict[str, float]" = OrderedDict(
+# Mirrors upstream SOURCE_PORTIONS.  We keep it to derive the text-only share
+# from the original mixed 120k recipe.
+ORIGINAL_SOURCE_PORTIONS: "OrderedDict[str, float]" = OrderedDict(
     [
         ("vqav2", 2),
         ("scienceqa", 0.5),
@@ -27,21 +28,13 @@ SOURCE_PORTIONS: "OrderedDict[str, float]" = OrderedDict(
 )
 
 
-# Dataset identity mirrors upstream SOURCE_CONFIGS.  Prompt strings live in the
-# upstream script and are reused by the processing wrappers.
+TEXT_CAPABILITY_SOURCE_NAMES = ("dapo", "triviaqa", "apigen-mt-5k")
+ORIGINAL_MIXED_TOTAL_QA_PAIRS = 120_000
+
+
+# Dataset identity mirrors upstream SOURCE_CONFIGS for text sources only.
+# Prompt strings live in the upstream script and are reused by the wrappers.
 CAPABILITY_SOURCE_DATASETS: dict[str, dict[str, Any]] = {
-    "vqav2": {"dataset_id": "HuggingFaceM4/FineVision", "dataset_config": "vqav2", "split": "train"},
-    "scienceqa": {"dataset_id": "HuggingFaceM4/FineVision", "dataset_config": "scienceqa", "split": "train"},
-    "chartqa": {"dataset_id": "HuggingFaceM4/FineVision", "dataset_config": "chartqa", "split": "train"},
-    "docvqa": {"dataset_id": "HuggingFaceM4/FineVision", "dataset_config": "docvqa", "split": "train"},
-    "screenqa": {"dataset_id": "HuggingFaceM4/FineVision", "dataset_config": "screenqa", "split": "train"},
-    "aokvqa": {"dataset_id": "HuggingFaceM4/FineVision", "dataset_config": "aokvqa", "split": "train"},
-    "ai2d_merged": {"dataset_id": "HuggingFaceM4/FineVision", "dataset_config": "ai2d_merged", "split": "train"},
-    "infographic_vqa": {"dataset_id": "HuggingFaceM4/FineVision", "dataset_config": "infographic_vqa", "split": "train"},
-    "groundui": {"dataset_id": "HuggingFaceM4/FineVision", "dataset_config": "groundui", "split": "train"},
-    "aguvis-stage-1": {"dataset_id": "HuggingFaceM4/FineVision", "dataset_config": "aguvis-stage-1", "split": "train"},
-    "aguvis-stage-2": {"dataset_id": "smolagents/aguvis-stage-2", "dataset_config": "android_control", "split": "train"},
-    "mm-openr1": {"dataset_id": "lmms-lab/multimodal-open-r1-8k-verified", "dataset_config": None, "split": "train"},
     "dapo": {"dataset_id": "open-r1/DAPO-Math-17k-Processed", "dataset_config": "en", "split": "train"},
     "triviaqa": {"dataset_id": "mandarjoshi/trivia_qa", "dataset_config": "rc", "split": "train"},
     "apigen-mt-5k": {"dataset_id": "Salesforce/APIGen-MT-5k", "dataset_config": None, "split": "train"},
@@ -49,10 +42,6 @@ CAPABILITY_SOURCE_DATASETS: dict[str, dict[str, Any]] = {
 
 
 BENCHMARK_DATASETS: dict[str, dict[str, Any]] = {
-    "mathvista": {"dataset_id": "AI4Math/MathVista", "dataset_config": None, "split": "testmini"},
-    "mathverse": {"dataset_id": "AI4Math/MathVerse", "dataset_config": "testmini", "split": "testmini"},
-    "charxiv_reasoning": {"dataset_id": "princeton-nlp/CharXiv", "dataset_config": None, "split": "validation"},
-    "simplevqa": {"dataset_id": "m-a-p/SimpleVQA", "dataset_config": None, "split": "test"},
     "triviaqa": {"dataset_id": "mandarjoshi/trivia_qa", "dataset_config": "rc", "split": "validation"},
 }
 
@@ -63,24 +52,29 @@ CSV_BENCHMARK_TARGETS = {
 }
 
 
-SCREENSPOT_REPO = "likaixin/ScreenSpot-Pro"
 WHEN2CALL_REPO = "nvidia/When2Call"
 WHEN2CALL_CONFIGS = ["train_sft", "train_pref", "test"]
 
 
-def allocate_source_counts(total: int) -> OrderedDict[str, int]:
-    ratio_sum = sum(float(v) for v in SOURCE_PORTIONS.values())
+def allocate_source_counts(total: int, portions: OrderedDict[str, float] | None = None) -> OrderedDict[str, int]:
+    portions = portions or ORIGINAL_SOURCE_PORTIONS
+    ratio_sum = sum(float(v) for v in portions.values())
     floors: list[tuple[str, int, float]] = []
     used = 0
-    for name, portion in SOURCE_PORTIONS.items():
+    for name, portion in portions.items():
         exact = int(total) * float(portion) / ratio_sum
         base = floor(exact)
         floors.append((name, base, exact - base))
         used += base
     remainder = int(total) - used
     floors.sort(key=lambda x: (-x[2], x[0]))
-    extras = {name: 0 for name in SOURCE_PORTIONS}
+    extras = {name: 0 for name in portions}
     for i in range(remainder):
         extras[floors[i][0]] += 1
     base_map = {name: base for name, base, _ in floors}
-    return OrderedDict((name, base_map[name] + extras[name]) for name in SOURCE_PORTIONS)
+    return OrderedDict((name, base_map[name] + extras[name]) for name in portions)
+
+
+_original_counts = allocate_source_counts(ORIGINAL_MIXED_TOTAL_QA_PAIRS, ORIGINAL_SOURCE_PORTIONS)
+TEXT_SOURCE_COUNTS = OrderedDict((name, _original_counts[name]) for name in TEXT_CAPABILITY_SOURCE_NAMES)
+TEXT_TOTAL_QA_PAIRS = sum(TEXT_SOURCE_COUNTS.values())

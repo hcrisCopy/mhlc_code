@@ -50,11 +50,10 @@ mhlc_data/downloads/hf_runtime_cache/
 
 ## 1. 下载 / 物料化原始数据
 
-```bash
-python src/01_download_data.py --group all
-```
+当前代码只走纯文本路线，不下载图像数据集。
+全部纯文本数据最终约 8GB，运行峰值建议预留 20GB。
 
-只下载 Capability Head 训练前所需源数据：
+下载 Capability Head 的纯文本源数据：
 
 ```bash
 python src/01_download_data.py --group capability
@@ -66,10 +65,16 @@ python src/01_download_data.py --group capability
 python src/01_download_data.py --group when2call
 ```
 
-只下载 Table 2 benchmark 数据：
+只下载可公开下载的纯文本 benchmark 数据：
 
 ```bash
 python src/01_download_data.py --group benchmarks
+```
+
+一次性下载全部纯文本数据：
+
+```bash
+python src/01_download_data.py --group all
 ```
 
 如果你有原 paper/local 的两个 CSV 快照，也可以一并导入到原 benchmark runner
@@ -84,12 +89,13 @@ python src/01_download_data.py --group benchmarks \
 
 原仓库没有提供这两个 CSV，也没有提供它们的 preparation scripts；没有 paper
 snapshot 时不用运行这条命令。默认 `--group benchmarks` 只物料化可下载的
-HF-backed benchmark 数据。
+HF-backed 文本 benchmark 数据。
 
 ## 2. Capability Head: 生成 raw completion 数据
 
-这一步严格复用原仓库 `combined_all_datagen_multimodel.py` 的采样比例、prompt、
-vLLM 参数和保存 schema，只把数据读取改成 `mhlc_data/data/sources/capability/...`。
+这一步严格复用原仓库 `combined_all_datagen_multimodel.py` 的文本 prompt、
+vLLM 参数和保存 schema。源数据只保留原混合 120k 配比里的纯文本部分：
+`dapo=10213`、`triviaqa=10213`、`apigen-mt-5k=20425`，合计 `40851`。
 
 ```bash
 python src/02_generate_capability_raw.py \
@@ -99,7 +105,7 @@ python src/02_generate_capability_raw.py \
 默认产物：
 
 ```text
-mhlc_data/data/train/Qwen3VL/Qwen3_VL_4B_Instruct_hard_Mixed_Sources_120k/
+mhlc_data/data/train/Qwen3VL/Qwen3_VL_4B_Instruct_text_only_OriginalMixedShare_40851/
   raw/
   selection_manifest.json
   generation_stats.json
@@ -110,7 +116,7 @@ mhlc_data/data/train/Qwen3VL/Qwen3_VL_4B_Instruct_hard_Mixed_Sources_120k/
 ```text
 model_family=qwen3_vl
 thinking_mode=off
-total_qa_pairs=120000
+total_qa_pairs=40851
 max_model_len=32768
 gpu_memory_utilization=0.90
 tensor_parallel_size=1
@@ -153,7 +159,7 @@ python src/03_label_capability_raw.py \
 默认产物：
 
 ```text
-mhlc_data/data/train/Qwen3VL/Qwen3_VL_4B_Instruct_hard_Mixed_Sources_120k/
+mhlc_data/data/train/Qwen3VL/Qwen3_VL_4B_Instruct_text_only_OriginalMixedShare_40851/
   verified/
   verification_stats.json
 ```

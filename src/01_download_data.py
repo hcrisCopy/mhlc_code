@@ -5,7 +5,7 @@ import argparse
 import shutil
 from pathlib import Path
 
-from mhlc_data_prep.hf_local import materialize_hf_split, snapshot_dataset_repo
+from mhlc_data_prep.hf_local import materialize_hf_split
 from mhlc_data_prep.paths import (
     ensure_mhlc_data_layout,
     resolve_from_code_root,
@@ -15,7 +15,6 @@ from mhlc_data_prep.specs import (
     BENCHMARK_DATASETS,
     CAPABILITY_SOURCE_DATASETS,
     CSV_BENCHMARK_TARGETS,
-    SCREENSPOT_REPO,
     WHEN2CALL_CONFIGS,
     WHEN2CALL_REPO,
 )
@@ -75,7 +74,7 @@ def copy_csv_benchmark(
 
 def main() -> None:
     ap = argparse.ArgumentParser(
-        description="Materialize MHLC upstream datasets under ../mhlc_data, not the default HF cache."
+        description="Materialize text-only MHLC upstream datasets under ../mhlc_data, not the default HF cache."
     )
     ap.add_argument("--data-root", default="../mhlc_data")
     ap.add_argument(
@@ -107,7 +106,6 @@ def main() -> None:
     set_hf_dirs_inside_data_root(data_root)
     runtime_cache = data_root / "downloads" / "hf_runtime_cache"
     dataset_cache = runtime_cache / "datasets"
-    hub_cache = runtime_cache / "hub"
     overwrite_outputs = bool(args.overwrite or args.clean)
 
     print(f"[paths] data_root={rel(data_root)}")
@@ -129,11 +127,12 @@ def main() -> None:
             print(f"[{status}] {name} -> {rel(out_dir)}")
 
     if args.group in {"all", "benchmarks"}:
-        allowed_benchmarks = set(BENCHMARK_DATASETS) | {"screenspot_pro"} | set(CSV_BENCHMARK_TARGETS)
+        allowed_benchmarks = set(BENCHMARK_DATASETS) | set(CSV_BENCHMARK_TARGETS)
         if args.benchmarks.strip().lower() == "all":
+            # Text-only route: "all" means all downloadable text benchmarks.
             # The upstream repo does not ship the paper CSV snapshots for
-            # math/mmlu_pro, so "all" means all downloadable benchmarks.
-            selected_benchmarks = sorted(set(BENCHMARK_DATASETS) | {"screenspot_pro"})
+            # math/mmlu_pro, so those are opt-in via explicit CSV arguments.
+            selected_benchmarks = sorted(BENCHMARK_DATASETS)
         else:
             selected_benchmarks = parse_csv(args.benchmarks, allowed_benchmarks)
         for name in progress(selected_benchmarks, "benchmarks"):
@@ -148,18 +147,6 @@ def main() -> None:
                     strict=args.strict_benchmark_csv,
                 )
                 print(f"[{status}] {name} -> {rel(target_path)}")
-                continue
-
-            if name == "screenspot_pro":
-                out_dir = data_root / "data" / "benchmarks" / "screenspot_pro"
-                status = snapshot_dataset_repo(
-                    repo_id=SCREENSPOT_REPO,
-                    out_dir=out_dir,
-                    cache_dir=hub_cache,
-                    allow_patterns=["annotations/*.json", "images/**"],
-                    overwrite=overwrite_outputs,
-                )
-                print(f"[{status}] {name} -> {rel(out_dir)}")
                 continue
 
             cfg = BENCHMARK_DATASETS[name]
