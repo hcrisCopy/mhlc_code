@@ -6,6 +6,7 @@ from pathlib import Path
 from typing import Any
 
 from datasets import DatasetDict, load_from_disk
+from tqdm.auto import tqdm
 
 from mhlc_data_prep.original import load_upstream_module
 from mhlc_data_prep.paths import (
@@ -66,6 +67,136 @@ def patch_text_only_sources(module: Any) -> None:
     }
 
 
+def patch_generation_progress(module: Any) -> None:
+    """Mirror upstream generation logic while adding a source-level tqdm bar."""
+
+    def generate_source_with_progress(
+        llm: Any,
+        ds: Any,
+        source_name: str,
+        pending_specs: list[dict[str, Any]],
+        sampling_bundle: dict[str, Any],
+        shard_rows: list[dict[str, Any]],
+        shard_idx: int,
+        completed_counts: dict[Any, int],
+        total_requests: int,
+        total_outputs: int,
+    ):
+        conversations: list[Any] = []
+        chunk_specs: list[dict[str, Any]] = []
+        chunk_saved_images: list[Any] = []
+        source_requests_done = 0
+        first_flush = True
+        modality = module.SOURCE_CONFIGS[source_name]["modality"]
+
+        progress_bar = tqdm(
+            total=len(pending_specs),
+            desc=f"generate {source_name}",
+            unit="req",
+            dynamic_ncols=True,
+            leave=True,
+        )
+
+        def flush_chunk(start_row_marker: int) -> None:
+            nonlocal conversations, chunk_specs, chunk_saved_images
+            nonlocal shard_rows, shard_idx, total_requests, total_outputs, first_flush
+            if not conversations:
+                return
+            if module.DEBUG_MODE and (first_flush or module.DEBUG_PRINT_REQUEST_DETAILS_EVERY_CHUNK):
+                preview_n = min(module.DEBUG_PROMPT_PREVIEWS, len(chunk_specs))
+                module._debug(
+                    f"[debug][generate] previewing {preview_n} {modality} request(s) "
+                    f"for source={source_name} near row {start_row_marker}"
+                )
+                for i in range(preview_n):
+                    spec = chunk_specs[i]
+                    module._debug(
+                        f"  request#{i+1} subset={spec['subset_name']} "
+                        f"row_index={spec['row_index']} qa_index={spec['qa_index']} "
+                        f"turn_index={spec['turn_index']} "
+                        f"q={module._preview_text(spec.get('question', ''))}"
+                    )
+
+            chat_kwargs = module._chat_template_kwargs_for_runtime()
+            llm_chat_kwargs: dict[str, Any] = {
+                "sampling_params": sampling_bundle["params"],
+                "use_tqdm": False,
+            }
+            if chat_kwargs:
+                llm_chat_kwargs["chat_template_kwargs"] = chat_kwargs
+            outputs = llm.chat(conversations, **llm_chat_kwargs)
+            total_requests += len(conversations)
+
+            debug_completion_printed = 0
+            for spec, saved_images, out in zip(chunk_specs, chunk_saved_images, outputs):
+                for gen_idx, candidate in enumerate(out.outputs):
+                    completion = candidate.text or ""
+                    raw = module._default_raw_row()
+                    raw.update(spec)
+                    raw.update(
+                        {
+                            "images": saved_images,
+                            "completion": completion,
+                            "generation_index": int(gen_idx),
+                            "completion_length": len(completion),
+                            "two_step_applied": False,
+                        }
+                    )
+                    shard_rows.append(raw)
+                    total_outputs += 1
+                    spec_key = module._spec_identity(spec)
+                    completed_counts[spec_key] = completed_counts.get(spec_key, 0) + 1
+                    shard_rows, shard_idx = module._flush_save_if_needed(shard_rows, shard_idx)
+                    if (
+                        module.DEBUG_MODE
+                        and (first_flush or module.DEBUG_PRINT_COMPLETION_DETAILS_EVERY_CHUNK)
+                        and debug_completion_printed < module.DEBUG_COMPLETION_PREVIEWS
+                    ):
+                        debug_completion_printed += 1
+                        module._debug(
+                            f"[debug][completion] subset={spec['subset_name']} "
+                            f"row_index={spec['row_index']} qa_index={spec['qa_index']} "
+                            f"turn_index={spec['turn_index']} model={module._preview_text(completion)}"
+                        )
+
+            progress_bar.update(len(conversations))
+            progress_bar.set_postfix(
+                shard=shard_idx,
+                outputs=total_outputs,
+                refresh=False,
+            )
+            conversations.clear()
+            chunk_specs.clear()
+            chunk_saved_images.clear()
+            first_flush = False
+            module.torch.cuda.empty_cache()
+            module.gc.collect()
+
+        try:
+            for spec in pending_specs:
+                conversation, raw_images = module._build_conversation(spec, ds)
+                conversations.append(conversation)
+                chunk_specs.append(spec)
+                chunk_saved_images.append(raw_images)
+                source_requests_done += 1
+                if len(conversations) >= module.GEN_CHUNK_SIZE:
+                    flush_chunk(int(spec["row_index"]))
+
+            flush_chunk(-1)
+            progress_bar.set_postfix(
+                shard=shard_idx,
+                outputs=total_outputs,
+                refresh=True,
+            )
+        finally:
+            progress_bar.close()
+
+        print(f"[generate] source={source_name} finished with {source_requests_done}/{len(pending_specs)} pending requests done")
+        return shard_rows, shard_idx, total_requests, total_outputs
+
+    module._generate_source = generate_source_with_progress
+
+
 def main() -> None:
     ap = argparse.ArgumentParser(
         description="Generate text-only MHLC Capability Head raw parquet with upstream logic and local materialized sources."
@@ -106,6 +237,7 @@ def main() -> None:
     )
     patch_text_only_sources(module)
     patch_source_loader(module, data_root, allow_hf_fallback=bool(args.allow_hf_fallback))
+    patch_generation_progress(module)
 
     argv = [
         "combined_all_datagen_multimodel.py",
