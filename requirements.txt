@@ -1,9 +1,11 @@
-# Install PyTorch first:
-# pip install torch==2.6.0 torchvision==0.21.0 torchaudio==2.6.0 --index-url https://download.pytorch.org/whl/cu124
+# Install a CUDA-compatible PyTorch build separately before this file.
+# For vLLM 0.11.0, use torch 2.8.0 / torchvision 0.23.0 / torchaudio 2.8.0.
+# Pick the CUDA wheel index that matches the server driver, for example:
+# pip install torch==2.8.0 torchvision==0.23.0 torchaudio==2.8.0 --index-url https://download.pytorch.org/whl/cu128
 #
-# This file is pinned for the torch 2.6.0 + CUDA 12.4 stack.
-# Keep torch / torchvision / torchaudio out of this file so the CUDA wheel
-# selected above is preserved.
+# Qwen3-VL is not recognized by the older transformers/vLLM stack used by
+# earlier Qwen3 examples. Keep torch / torchvision / torchaudio out of this
+# file so the CUDA wheel selected above is preserved.
 
 datasets==3.6.0
 fastapi==0.115.12
@@ -14,17 +16,15 @@ pandas==2.2.3
 pillow==11.2.1
 pyarrow==20.0.0
 PyYAML==6.0.2
-qwen-vl-utils==0.0.11
+qwen-vl-utils==0.0.14
 requests==2.32.3
 scikit-learn==1.6.1
 tqdm==4.67.1
-transformers==4.51.3
-unsloth==2025.5.8
-unsloth_zoo==2025.5.10
+transformers==4.57.1
+unsloth
 uvicorn==0.34.2
-vllm==0.8.5.post1
+vllm==0.11.0
 wandb==0.19.11
-xformers==0.0.29.post2; platform_system == "Linux" and platform_machine == "x86_64"
 
 # Math verification used by combined_all_labeling_multimodel.py.
 latex2sympy2-extended==1.10.2
