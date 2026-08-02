@@ -9,7 +9,7 @@
 
 datasets==3.6.0
 fastapi==0.115.12
-huggingface-hub==0.31.4
+huggingface-hub>=0.34.0,<1.0
 matplotlib==3.10.3
 numpy==2.2.6
 pandas==2.2.3
