@@ -86,8 +86,9 @@ python src/14_eval_capability_table2_textbench.py \
   --baseline-head-path ../mhlc_data/trained_models/baseline_capability_heads/Qwen__Qwen3-VL-4B-Instruct/full/capability_head.pt \
   --attn-implementation sdpa \
   --max-samples 2 \
-  --vllm-max-model-len 16000 \
-  --max-seq-len 16000 \
+  --vllm-max-model-len 4096 \
+  --max-seq-len 4096 \
+  --generation-max-new-tokens 512 \
   --model1-generation-batch-size 1 \
   --model2-generation-batch-size 1 \
   --model1-max-num-seqs 1 \

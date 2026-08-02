@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import argparse
 import copy
+import gc
 import json
 import time
 from pathlib import Path
@@ -67,6 +68,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--model2-max-num-seqs", type=int, default=16)
     parser.add_argument("--model1-generation-batch-size", type=int, default=8)
     parser.add_argument("--model2-generation-batch-size", type=int, default=4)
+    parser.add_argument("--generation-max-new-tokens", type=int, default=None)
     parser.add_argument("--score-batch-size", type=int, default=1)
     parser.add_argument("--m2-input-cost-per-1m-usd", type=float, default=0.70)
     parser.add_argument("--m2-output-cost-per-1m-usd", type=float, default=8.40)
@@ -295,6 +297,9 @@ def _build_generation_bundle(shared: Any, generate_mod: Any, args: argparse.Name
         thinking_mode=thinking,
         benchmark=benchmark,
     )
+    if args.generation_max_new_tokens is not None:
+        sampling_override = dict(sampling_override or {})
+        sampling_override["max_new_tokens"] = int(args.generation_max_new_tokens)
     return shared.build_model_bundle(
         model_name_or_path=model_path,
         aux_head_ckpt="",
@@ -305,6 +310,19 @@ def _build_generation_bundle(shared: Any, generate_mod: Any, args: argparse.Name
         model_family=family,
         thinking_mode=thinking,
     )
+
+
+def _release_accelerator_memory(label: str) -> None:
+    gc.collect()
+    try:
+        import torch
+
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+            torch.cuda.ipc_collect()
+    except Exception:
+        pass
+    print(f"[memory] released after {label}", flush=True)
 
 
 def _usage_template() -> dict[str, dict[str, Any]]:
@@ -386,6 +404,7 @@ def _generate_single_agent_rows(
             print(f"[write] {rel(path)} rows={len(rows_by_key)}/{len(examples)}", flush=True)
     finally:
         runtime.unload(drop_processor=False)
+        _release_accelerator_memory(f"{benchmark}:{strategy_name}")
     return _ordered_rows(rows_by_key, examples)
 
 
@@ -458,6 +477,7 @@ def _score_mhlc_head(
             write_jsonl(out_path, _ordered_rows(valid_by_key, examples))
     finally:
         scorer.unload(drop_processor=False)
+        _release_accelerator_memory(f"{benchmark}:score MHLC head")
     return _ordered_rows(valid_by_key, examples)
 
 
