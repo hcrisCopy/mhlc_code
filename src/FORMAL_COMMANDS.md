@@ -12,7 +12,20 @@ cd mhlc_code
 ../Qwen/Qwen3-VL-4B-Instruct
 ```
 
+本地模型用途：
+
+```text
+../Qwen/Qwen3-VL-4B-Instruct：当前 backbone，生成训练/评测 completion，并训练/评测我们的 4B 神经元 head。
+../Qwen/Qwen3-VL-8B-Instruct：Table2 文本 benchmark 的 judge fallback，按原项目评测口径使用。
+../Qwen/Qwen3-VL-32B-Thinking-FP8：Table2 的强模型 model2，thinking mode 保持 on。
+../Qwen/Qwen3-VL-32B-Instruct-FP8：32B Instruct 相关 baseline/扩展实验备用，不是当前 4B 主线默认模型。
+../Qwen/Qwen3-VL-30B-A3B-Instruct-FP8：Capability raw correctness_score judge。
+../Qwen/Qwen3-30B-A3B-Instruct-2507-FP8：When2Call 四类标签 annotator，纯文本模型。
+```
+
 正式换模型时，主要改各命令里的 `--model-path`、`--model1-path`、`--model2-path`。默认命令会复用已有产物；要重跑某一步，在对应命令最后加 `--clean`。
+
+Attention 后端按原作者 recipe 对齐：Capability / Table2 / TriviaQA 使用 `flash_attention_3`，Resolution / When2Call 使用 `flash_attention_2`。如果服务器加载模型时明确报 flash attention 不支持，再把对应命令临时改成 `sdpa` 作为兼容兜底；这不是严格原作者参数。
 
 ## 0. 下载原作者 Capability Head
 
@@ -36,7 +49,7 @@ python src/13_download_baseline_capability_head.py --all --dry-run
 
 ## 1. 下载和物料化数据
 
-一次性准备 Capability、When2Call 和 benchmark 纯文本数据。
+一次性准备 Capability、When2Call 和 benchmark 纯文本数据。`math`、`mmlu_pro` 会按下载脚本固定种子抽样并物料化成对应 CSV。
 
 ```bash
 python src/01_download_data.py --group all
@@ -47,23 +60,6 @@ python src/01_download_data.py --group all
 ```text
 ../mhlc_data/data/sources/
 ../mhlc_data/data/benchmarks/
-```
-
-如果只想分块下载，可以分别跑：
-
-```bash
-python src/01_download_data.py --group capability
-python src/01_download_data.py --group when2call
-python src/01_download_data.py --group benchmarks
-```
-
-如果有论文或作者快照版的 `math`、`mmlu_pro` CSV，优先导入它们。
-
-```bash
-python src/01_download_data.py --group benchmarks \
-  --benchmarks math,mmlu_pro \
-  --math-csv ../paper_snapshots/merged_math.csv \
-  --mmlu-pro-csv ../paper_snapshots/test.csv
 ```
 
 输出到：
@@ -148,7 +144,9 @@ python src/05_generate_when2call_completions.py \
 ```bash
 python src/07_probe_capability_neurons.py \
   --model-path ../Qwen/Qwen3-VL-4B-Instruct \
-  --attn-implementation sdpa
+  --thinking-mode off \
+  --attn-implementation flash_attention_3 \
+  --num-workers 8
 ```
 
 输出到：
@@ -165,7 +163,18 @@ python src/07_probe_capability_neurons.py \
 ```bash
 python src/08_train_capability_neuron_head.py \
   --model-path ../Qwen/Qwen3-VL-4B-Instruct \
-  --attn-implementation sdpa
+  --thinking-mode off \
+  --attn-implementation flash_attention_3 \
+  --train-batch-size 1 \
+  --grad-accum-steps 16 \
+  --num-epochs 2 \
+  --num-workers 8 \
+  --lr 1.0e-4 \
+  --warmup-ratio 0.03 \
+  --min-lr-ratio 0.10 \
+  --failure-threshold 0.5 \
+  --min-class-weight 0.1 \
+  --max-class-weight 10
 ```
 
 输出到：
@@ -185,7 +194,9 @@ python src/08_train_capability_neuron_head.py \
 ```bash
 python src/09_probe_resolution_neurons.py \
   --model-path ../Qwen/Qwen3-VL-4B-Instruct \
-  --attn-implementation sdpa
+  --thinking-mode off \
+  --attn-implementation flash_attention_2 \
+  --num-workers 4
 ```
 
 输出到：
@@ -202,7 +213,18 @@ python src/09_probe_resolution_neurons.py \
 ```bash
 python src/10_train_resolution_neuron_head.py \
   --model-path ../Qwen/Qwen3-VL-4B-Instruct \
-  --attn-implementation sdpa
+  --thinking-mode off \
+  --attn-implementation flash_attention_2 \
+  --train-batch-size 1 \
+  --grad-accum-steps 16 \
+  --num-epochs 5 \
+  --num-workers 4 \
+  --lr 1.0e-4 \
+  --warmup-ratio 0.03 \
+  --min-lr-ratio 0.10 \
+  --decision-threshold 0.5 \
+  --min-class-weight 1.0 \
+  --max-class-weight 10
 ```
 
 输出到：
@@ -221,7 +243,12 @@ python src/10_train_resolution_neuron_head.py \
 
 ```bash
 python src/06_generate_when2call_eval_completions.py \
-  --model-path ../Qwen/Qwen3-VL-4B-Instruct
+  --model-path ../Qwen/Qwen3-VL-4B-Instruct \
+  --thinking-mode off \
+  --batch-size 64 \
+  --max-tokens 16000 \
+  --gpu-memory-utilization 0.50 \
+  --max-model-len 32000
 ```
 
 输出到：
@@ -237,7 +264,13 @@ python src/06_generate_when2call_eval_completions.py \
 ```bash
 python src/11_eval_capability_triviaqa_neuron_head.py \
   --model-path ../Qwen/Qwen3-VL-4B-Instruct \
-  --attn-implementation sdpa
+  --thinking-mode off \
+  --attn-implementation flash_attention_3 \
+  --thresholds 0.5,0.6,0.7,0.8,0.9,0.95 \
+  --generation-batch-size 64 \
+  --vllm-max-model-len 32768 \
+  --vllm-gpu-memory-utilization 0.40 \
+  --vllm-max-num-seqs 128
 ```
 
 输出到：
@@ -266,7 +299,8 @@ plots/threshold_score_calls.png
 ```bash
 python src/12_eval_resolution_when2call_neuron_head.py \
   --model-path ../Qwen/Qwen3-VL-4B-Instruct \
-  --attn-implementation sdpa \
+  --thinking-mode off \
+  --attn-implementation flash_attention_2 \
   --decision-threshold 0.1
 ```
 
@@ -298,9 +332,20 @@ plots/head_confusion.png
 python src/14_eval_capability_table2_textbench.py \
   --model1-path ../Qwen/Qwen3-VL-4B-Instruct \
   --model2-path ../Qwen/Qwen3-VL-32B-Thinking-FP8 \
+  --model1-thinking-mode off \
+  --model2-thinking-mode on \
   --baseline-head-path ../mhlc_data/trained_models/baseline_capability_heads/Qwen__Qwen3-VL-4B-Instruct/full/capability_head.pt \
-  --attn-implementation sdpa \
-  --threshold 0.8 \
+  --attn-implementation flash_attention_3 \
+  --thresholds 0.5,0.6,0.7,0.8,0.9 \
+  --vllm-max-model-len 32768 \
+  --model1-generation-batch-size 128 \
+  --model2-generation-batch-size 64 \
+  --model1-max-num-seqs 128 \
+  --model2-max-num-seqs 64 \
+  --model1-gpu-memory-utilization 0.70 \
+  --model2-gpu-memory-utilization 0.80 \
+  --judge-model-path ../Qwen/Qwen3-VL-8B-Instruct \
+  --judge-batch-size 32 \
   --m2-input-cost-per-1m-usd 0.70 \
   --m2-output-cost-per-1m-usd 8.40
 ```
@@ -317,22 +362,27 @@ python src/14_eval_capability_table2_textbench.py \
 run_config.json
 table2_textbench_comparison.json
 table2_textbench_comparison.csv
+table2_textbench_comparison_threshold_0p5.json
+table2_textbench_comparison_threshold_0p5.csv
 plots/table2_score_cost.png
+plots/table2_score_cost_threshold_0p5.png
 triviaqa/single_agent_model1/results.jsonl
 triviaqa/single_agent_model2/results.jsonl
 triviaqa/head_scores_mhlc.jsonl
 triviaqa/head_scores_ours.jsonl
-triviaqa/routed_mhlc/results_scored.jsonl
-triviaqa/routed_ours/results_scored.jsonl
+triviaqa/routed_mhlc_threshold_0p5/results_scored.jsonl
+triviaqa/routed_ours_threshold_0p5/results_scored.jsonl
 ```
 
-`math/` 和 `mmlu_pro/` 下也会保存同样结构的文件。
+`math/` 和 `mmlu_pro/` 下也会保存同样结构的文件。终端会按 `--thresholds` 中的每个阈值分别打印一张 Table2 风格表格。
 
-默认不加载额外 judge；如果要启用 judge fallback，再加：
+正式命令已经启用原项目 Table2 评测口径的 8B judge：
 
 ```bash
 --judge-model-path ../Qwen/Qwen3-VL-8B-Instruct
 ```
+
+如果只想快速规则评测，可以把 `--judge-model-path` 留空，但那不是正式口径。
 
 如果 baseline head 是原项目自己训练保存的旧文件名，可以把参数改成：
 

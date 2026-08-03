@@ -41,7 +41,12 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--baseline-head-path", default=DEFAULT_BASELINE_HEAD)
     parser.add_argument("--ours-head-checkpoint-path", default=None)
     parser.add_argument("--ours-neuron-path", default=None)
-    parser.add_argument("--threshold", type=float, default=0.8)
+    parser.add_argument("--threshold", type=float, default=None)
+    parser.add_argument(
+        "--thresholds",
+        default=None,
+        help="Comma-separated routing thresholds. Defaults to the original Table 2 grid: 0.5,0.6,0.7,0.8,0.9.",
+    )
     parser.add_argument("--call-model2-if-missing-final-answer", action=argparse.BooleanOptionalAction, default=True)
     parser.add_argument("--model1-family", default="qwen3_vl", choices=["auto", "qwen3_5", "qwen3", "qwen3_vl", "gemma4", "other"])
     parser.add_argument("--model1-thinking-mode", default="off", choices=["auto", "on", "off"])
@@ -96,6 +101,32 @@ def _parse_benchmarks(text: str) -> list[str]:
     if bad:
         raise ValueError(f"Unsupported text benchmarks: {bad}. Supported: {TEXT_BENCHMARKS}")
     return values
+
+
+def _parse_thresholds(thresholds_text: str | None, single_threshold: float | None) -> list[float]:
+    text = str(thresholds_text or "").strip()
+    if text:
+        values = [float(part.strip()) for part in text.split(",") if part.strip()]
+    elif single_threshold is not None:
+        values = [float(single_threshold)]
+    else:
+        values = [0.5, 0.6, 0.7, 0.8, 0.9]
+    if not values:
+        raise ValueError("No routing thresholds provided.")
+    bad = [value for value in values if value < 0.0 or value > 1.0]
+    if bad:
+        raise ValueError(f"Thresholds must be in [0, 1], got: {bad}")
+    return sorted(set(float(value) for value in values))
+
+
+def _threshold_tag(threshold: float) -> str:
+    return f"{float(threshold):.3f}".rstrip("0").rstrip(".").replace(".", "p")
+
+
+def _strategy_dir(bench_dir: Path, strategy_name: str, threshold: float, *, multi_threshold: bool) -> Path:
+    if not multi_threshold:
+        return bench_dir / strategy_name
+    return bench_dir / f"{strategy_name}_threshold_{_threshold_tag(threshold)}"
 
 
 def _chunked(items: Sequence[Any], batch_size: int):
@@ -682,9 +713,17 @@ def _paid_cost(summary: dict[str, Any], input_price: float, output_price: float)
     return prompt_tokens * float(input_price) / 1_000_000.0 + completion_tokens * float(output_price) / 1_000_000.0
 
 
-def _summary_row(method: str, benchmark: str, summary: dict[str, Any], input_price: float, output_price: float) -> dict[str, Any]:
+def _summary_row(
+    method: str,
+    benchmark: str,
+    summary: dict[str, Any],
+    input_price: float,
+    output_price: float,
+    *,
+    threshold: float | None = None,
+) -> dict[str, Any]:
     usage = summary.get("usage_totals_by_model", {}).get("model2", {})
-    return {
+    row = {
         "method": method,
         "benchmark": benchmark,
         "score": float(summary.get("primary_metric_value", summary.get("accuracy", 0.0)) or 0.0),
@@ -694,6 +733,9 @@ def _summary_row(method: str, benchmark: str, summary: dict[str, Any], input_pri
         "model2_prompt_tokens": int(usage.get("prompt_tokens", 0) or 0),
         "model2_completion_tokens": int(usage.get("completion_tokens", 0) or 0),
     }
+    if threshold is not None:
+        row["threshold"] = float(threshold)
+    return row
 
 
 def _overall_rows(rows: list[dict[str, Any]], benchmarks: Sequence[str]) -> list[dict[str, Any]]:
@@ -706,7 +748,7 @@ def _overall_rows(rows: list[dict[str, Any]], benchmarks: Sequence[str]) -> list
         method_rows = [row for row in rows if row["method"] == method and row["benchmark"] in benchmarks]
         if not method_rows:
             continue
-        out.append({
+        overall = {
             "method": method,
             "benchmark": "overall",
             "score": sum(float(row["score"]) for row in method_rows) / len(method_rows),
@@ -715,16 +757,20 @@ def _overall_rows(rows: list[dict[str, Any]], benchmarks: Sequence[str]) -> list
             "model2_calls": sum(int(row["model2_calls"]) for row in method_rows),
             "model2_prompt_tokens": sum(int(row["model2_prompt_tokens"]) for row in method_rows),
             "model2_completion_tokens": sum(int(row["model2_completion_tokens"]) for row in method_rows),
-        })
+        }
+        if "threshold" in method_rows[0]:
+            overall["threshold"] = float(method_rows[0]["threshold"])
+        out.append(overall)
     return out
 
 
-def _print_table(rows: list[dict[str, Any]], benchmarks: Sequence[str]) -> None:
+def _print_table(rows: list[dict[str, Any]], benchmarks: Sequence[str], threshold: float | None = None) -> None:
     order = [*benchmarks, "overall"]
     by_method: dict[str, dict[str, dict[str, Any]]] = {}
     for row in rows:
         by_method.setdefault(row["method"], {})[row["benchmark"]] = row
-    print("\nTable 2 style text benchmark score / paid cost", flush=True)
+    suffix = "" if threshold is None else f" (threshold={float(threshold):.2f})"
+    print(f"\nTable 2 style text benchmark score / paid cost{suffix}", flush=True)
     print("| Method | " + " | ".join(name if name != "overall" else "Overall" for name in order) + " |", flush=True)
     print("|---|" + "|".join("---:" for _ in order) + "|", flush=True)
     for method, payload in by_method.items():
@@ -769,6 +815,9 @@ def _plot_table(rows: list[dict[str, Any]], output_path: Path, benchmarks: Seque
 
 def main() -> None:
     args = parse_args()
+    thresholds = _parse_thresholds(args.thresholds, args.threshold)
+    args.threshold = thresholds[0]
+    multi_threshold = len(thresholds) > 1
     benchmarks = _parse_benchmarks(args.benchmarks)
     data_root = resolve_from_code_root(args.data_root)
     ensure_mhlc_data_layout(data_root)
@@ -815,6 +864,8 @@ def main() -> None:
         "benchmarks": benchmarks,
         "max_samples": int(args.max_samples),
         "threshold": float(args.threshold),
+        "thresholds": thresholds,
+        "score_pred_threshold": float(args.threshold),
         "baseline_head_path": rel(baseline_head_path),
         "ours_head_checkpoint_path": rel(ours_head_path),
         "ours_neuron_path": rel(ours_neuron_path),
@@ -852,7 +903,7 @@ def main() -> None:
         )
 
     dataset_cfgs = _dataset_cfgs(args)
-    all_rows: list[dict[str, Any]] = []
+    all_rows_by_threshold: dict[float, list[dict[str, Any]]] = {threshold: [] for threshold in thresholds}
     try:
         for benchmark in benchmarks:
             bench_dir = output_dir / benchmark
@@ -931,46 +982,82 @@ def main() -> None:
                     reuse=bool(args.reuse_evaluations),
                     debug=bool(args.debug),
                 )
-                all_rows.append(_summary_row(display_name, benchmark, summary, args.m2_input_cost_per_1m_usd, args.m2_output_cost_per_1m_usd))
+                for threshold in thresholds:
+                    all_rows_by_threshold[threshold].append(_summary_row(
+                        display_name,
+                        benchmark,
+                        summary,
+                        args.m2_input_cost_per_1m_usd,
+                        args.m2_output_cost_per_1m_usd,
+                        threshold=threshold,
+                    ))
 
             for display_name, strategy_name, score_rows in route_specs:
-                routed_rows = _build_routed_rows(
-                    generate_mod=generate_mod,
-                    shared=shared,
-                    benchmark=benchmark,
-                    examples=examples,
-                    m1_rows=m1_rows,
-                    m2_rows=m2_rows,
-                    score_rows=score_rows,
-                    strategy_name=strategy_name,
-                    threshold=float(args.threshold),
-                    call_model2_if_missing_final_answer=bool(args.call_model2_if_missing_final_answer),
-                )
-                strategy_dir = bench_dir / strategy_name
-                strategy_dir.mkdir(parents=True, exist_ok=True)
-                write_jsonl(strategy_dir / "results.jsonl", routed_rows)
-                _scored, summary = _evaluate_rows(
-                    eval_mod=eval_mod,
-                    benchmark=benchmark,
-                    rows=routed_rows,
-                    out_dir=strategy_dir,
-                    strategy_name=strategy_name,
-                    judge_runtime=judge_runtime,
-                    judge_sampling=judge_sampling,
-                    judge_batch_size=int(args.judge_batch_size),
-                    reuse=False,
-                    debug=bool(args.debug),
-                )
-                all_rows.append(_summary_row(display_name, benchmark, summary, args.m2_input_cost_per_1m_usd, args.m2_output_cost_per_1m_usd))
+                for threshold in thresholds:
+                    routed_rows = _build_routed_rows(
+                        generate_mod=generate_mod,
+                        shared=shared,
+                        benchmark=benchmark,
+                        examples=examples,
+                        m1_rows=m1_rows,
+                        m2_rows=m2_rows,
+                        score_rows=score_rows,
+                        strategy_name=strategy_name,
+                        threshold=float(threshold),
+                        call_model2_if_missing_final_answer=bool(args.call_model2_if_missing_final_answer),
+                    )
+                    strategy_dir = _strategy_dir(
+                        bench_dir,
+                        strategy_name,
+                        threshold,
+                        multi_threshold=multi_threshold,
+                    )
+                    strategy_dir.mkdir(parents=True, exist_ok=True)
+                    write_jsonl(strategy_dir / "results.jsonl", routed_rows)
+                    _scored, summary = _evaluate_rows(
+                        eval_mod=eval_mod,
+                        benchmark=benchmark,
+                        rows=routed_rows,
+                        out_dir=strategy_dir,
+                        strategy_name=f"{strategy_name}_threshold_{_threshold_tag(threshold)}" if multi_threshold else strategy_name,
+                        judge_runtime=judge_runtime,
+                        judge_sampling=judge_sampling,
+                        judge_batch_size=int(args.judge_batch_size),
+                        reuse=bool(args.reuse_evaluations),
+                        debug=bool(args.debug),
+                    )
+                    all_rows_by_threshold[threshold].append(_summary_row(
+                        display_name,
+                        benchmark,
+                        summary,
+                        args.m2_input_cost_per_1m_usd,
+                        args.m2_output_cost_per_1m_usd,
+                        threshold=threshold,
+                    ))
     finally:
         if judge_runtime is not None:
             judge_runtime.unload(drop_processor=False)
 
-    table_rows = _overall_rows(all_rows, benchmarks)
-    write_json(output_dir / "table2_textbench_comparison.json", {"rows": table_rows})
-    write_csv(output_dir / "table2_textbench_comparison.csv", table_rows)
-    _plot_table(table_rows, output_dir / "plots" / "table2_score_cost.png", benchmarks)
-    _print_table(table_rows, benchmarks)
+    tables: list[dict[str, Any]] = []
+    combined_rows: list[dict[str, Any]] = []
+    for idx, threshold in enumerate(thresholds):
+        table_rows = _overall_rows(all_rows_by_threshold[threshold], benchmarks)
+        tables.append({"threshold": float(threshold), "rows": table_rows})
+        combined_rows.extend(table_rows)
+        suffix = _threshold_tag(threshold)
+        write_json(
+            output_dir / f"table2_textbench_comparison_threshold_{suffix}.json",
+            {"threshold": float(threshold), "rows": table_rows},
+        )
+        write_csv(output_dir / f"table2_textbench_comparison_threshold_{suffix}.csv", table_rows)
+        threshold_plot = output_dir / "plots" / f"table2_score_cost_threshold_{suffix}.png"
+        _plot_table(table_rows, threshold_plot, benchmarks)
+        if idx == 0:
+            _plot_table(table_rows, output_dir / "plots" / "table2_score_cost.png", benchmarks)
+        _print_table(table_rows, benchmarks, threshold)
+
+    write_json(output_dir / "table2_textbench_comparison.json", {"thresholds": thresholds, "tables": tables, "rows": combined_rows})
+    write_csv(output_dir / "table2_textbench_comparison.csv", combined_rows)
     print(f"[done] saved Table 2 style textbench eval to {rel(output_dir)}", flush=True)
 
 
