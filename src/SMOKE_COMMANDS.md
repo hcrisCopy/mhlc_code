@@ -162,10 +162,9 @@ python src/05_generate_when2call_completions.py \
 python src/07_probe_capability_neurons.py \
   --model-path ../Qwen/Qwen3-VL-4B-Instruct \
   --dataset-path ../mhlc_data/data/train/Qwen3VL/Qwen3_VL_4B_Instruct_text_only_smoke_60/verified \
-  --attn-implementation flash_attention_3 \
+  --attn-implementation sdpa \
   --max-seq-len 16000 \
-  --batch-size 1 \
-  --clean
+  --batch-size 1
 ```
 
 输出到：
