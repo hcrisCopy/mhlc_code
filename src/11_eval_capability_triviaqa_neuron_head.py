@@ -10,6 +10,10 @@ from typing import Any, Sequence
 
 from tqdm.auto import tqdm
 
+from mhlc_data_prep.parallel import configure_parallel_context, contiguous_range, worker_dir
+
+PARALLEL = configure_parallel_context()
+
 from mhlc_data_prep.original import load_upstream_module
 from mhlc_data_prep.paths import ensure_mhlc_data_layout, resolve_from_code_root, set_hf_dirs_inside_data_root
 from mhlc_data_prep.run_utils import clean_path, rel
@@ -234,6 +238,117 @@ def _plot_threshold_sweep(path: Path, rows: list[dict[str, Any]]) -> None:
     plt.close(fig)
 
 
+def _completion_marker(output_dir: Path) -> Path:
+    return output_dir / ".capability_triviaqa_eight_gpu_complete.json"
+
+
+def _ordered_parallel_rows(work_root: Path, filename: str) -> list[dict[str, Any]]:
+    rows: list[dict[str, Any]] = []
+    for rank in range(PARALLEL.world_size):
+        path = work_root / f"rank_{rank:02d}" / filename
+        if not path.exists():
+            raise FileNotFoundError(f"Missing eight-GPU TriviaQA worker output: {rel(path)}")
+        rows.extend(read_jsonl(path))
+    return sorted(rows, key=lambda row: int(row.get("sample_idx", 0)))
+
+
+def _merge_parallel_eval(
+    *,
+    args: argparse.Namespace,
+    trivia: Any,
+    output_dir: Path,
+    work_root: Path,
+    examples: list[dict[str, Any]],
+    thresholds: list[float],
+) -> None:
+    """Aggregate independent worker rows, then apply the unchanged table logic."""
+    output_dir.mkdir(parents=True, exist_ok=True)
+    write_json(output_dir / "run_config.json", {
+        "model_path": args.model_path,
+        "parallel_workers": PARALLEL.world_size,
+        "thresholds": thresholds,
+        "report_threshold": args.report_threshold,
+        "call_tool_if_missing_final_answer": bool(args.call_tool_if_missing_final_answer),
+    })
+    write_json(output_dir / "dataset_summary.json", {"benchmark": "triviaqa", "num_examples": len(examples)})
+    standard_raw = _ordered_parallel_rows(work_root, "standard_no_tool_rows_raw_generation.jsonl")
+    tool_raw = _ordered_parallel_rows(work_root, "tool_enabled_rows_raw_generation.jsonl")
+    standard_rows = _ordered_parallel_rows(work_root, "standard_no_tool_rows_scored_with_neuron_head.jsonl")
+    tool_rows = _ordered_parallel_rows(work_root, "tool_enabled_rows.jsonl")
+    trivia.save_rows_to_parquet(output_dir / "standard_no_tool_rows_raw_generation.parquet", standard_raw, debug=bool(args.debug))
+    trivia.save_rows_to_parquet(output_dir / "tool_enabled_rows_raw_generation.parquet", tool_raw, debug=bool(args.debug))
+    write_jsonl(output_dir / "standard_no_tool_rows_raw_generation.jsonl", standard_raw)
+    write_jsonl(output_dir / "tool_enabled_rows_raw_generation.jsonl", tool_raw)
+    write_jsonl(output_dir / "standard_no_tool_rows_scored_with_neuron_head.jsonl", standard_rows)
+    write_jsonl(output_dir / "tool_enabled_rows.jsonl", tool_rows)
+    trivia.save_rows_to_parquet(output_dir / "standard_no_tool_rows_scored_with_neuron_head.parquet", standard_rows, debug=bool(args.debug))
+    trivia.save_rows_to_parquet(output_dir / "tool_enabled_rows.parquet", tool_rows, debug=bool(args.debug))
+
+    y_true = [int(row.get("base_correct", 0)) for row in standard_rows]
+    y_prob = [float(row.get("aux_prob_correct")) for row in standard_rows if row.get("aux_prob_correct") is not None]
+    aux_metrics = trivia.compute_aux_binary_metrics(y_true, y_prob) if len(y_true) == len(y_prob) and y_prob else None
+    no_head_summary = trivia.compute_no_head_summary(base_rows=standard_rows, tool_rows=tool_rows)
+    no_tool_score = float(sum(y_true) / max(len(y_true), 1))
+    no_head_summary["score_standard_no_tool"] = no_tool_score
+    threshold_summaries = [
+        trivia.compute_threshold_summary(
+            threshold=threshold,
+            base_rows=standard_rows,
+            no_head_summary=no_head_summary,
+            call_tool_if_missing_final_answer=bool(args.call_tool_if_missing_final_answer),
+        )
+        for threshold in thresholds
+    ]
+    if args.report_threshold is not None:
+        chosen = next((row for row in threshold_summaries if math.isclose(float(row["threshold"]), float(args.report_threshold), abs_tol=1.0e-8)), None)
+        if chosen is None:
+            raise ValueError(f"--report-threshold {args.report_threshold} is not in --thresholds {thresholds}")
+        chosen = dict(chosen)
+        chosen["selection_rule"] = "requested_report_threshold"
+    else:
+        chosen = trivia.select_best_threshold(threshold_summaries, no_head_summary)
+
+    threshold_rows_flat = [{key: value for key, value in row.items() if key != "per_example"} for row in threshold_summaries]
+    threshold_decision_rows = [decision for row in threshold_summaries for decision in row.get("per_example", [])]
+    tool_by_idx = {int(row.get("sample_idx", 0)): row for row in tool_rows}
+    merged_rows = []
+    for base_row in standard_rows:
+        tool_row = tool_by_idx[int(base_row.get("sample_idx", 0))]
+        merged_rows.append({
+            "sample_idx": base_row.get("sample_idx"), "id": base_row.get("id"), "question": base_row.get("question"),
+            "gold_answer": base_row.get("gold_answer"), "standard_raw_response": base_row.get("raw_response"),
+            "standard_correct": int(base_row.get("base_correct", 0)), "standard_has_final_answer": int(base_row.get("base_has_final_answer", False)),
+            "aux_prob_correct": base_row.get("aux_prob_correct"), "tool_enabled_raw_response": tool_row.get("raw_response"),
+            "tool_called_by_model": int(tool_row.get("tool_called_by_model", 0)), "tool_query": tool_row.get("tool_query"),
+            "model_selftool_simulated_correct": int(tool_row.get("model_selftool_simulated_correct", 0)),
+            "model_selftool_unnecessary_tool_call": int(tool_row.get("model_selftool_unnecessary_tool_call", 0)),
+            "model_selftool_missed_incorrect_without_tool": int(tool_row.get("model_selftool_missed_incorrect_without_tool", 0)),
+        })
+    write_jsonl(output_dir / "merged_per_example_rows.jsonl", merged_rows)
+    write_jsonl(output_dir / "threshold_decisions_per_example.jsonl", threshold_decision_rows)
+    write_csv(output_dir / "threshold_summary.csv", threshold_rows_flat)
+    write_csv(output_dir / "merged_per_example_rows.csv", merged_rows)
+    write_csv(output_dir / "threshold_decisions_per_example.csv", threshold_decision_rows)
+    _plot_threshold_sweep(output_dir / "plots" / "threshold_score_calls.png", threshold_rows_flat)
+    ours_row = _table_row_from_threshold(no_tool_score, chosen or {})
+    table_rows = _paper_table_rows(args.model_path, ours_row)
+    write_json(output_dir / "paper_table4_comparison.json", {"rows": table_rows, "paper_source": "Multi-Head Latent Control Table 4"})
+    write_csv(output_dir / "paper_table4_comparison.csv", table_rows)
+    summary = {
+        "benchmark": "triviaqa", "model_path": args.model_path, "num_rows": len(examples), "aux_metrics": aux_metrics,
+        "no_head_summary": no_head_summary, "threshold_summaries": threshold_rows_flat,
+        "chosen_threshold_summary": {key: value for key, value in (chosen or {}).items() if key != "per_example"},
+        "paper_table4_comparison": table_rows, "parallel_workers": PARALLEL.world_size,
+    }
+    write_json(output_dir / "summary.json", summary)
+    _completion_marker(output_dir).write_text(
+        json.dumps({"world_size": PARALLEL.world_size, "rows": len(standard_rows)}, ensure_ascii=False, indent=2), encoding="utf-8"
+    )
+    print(json.dumps(summary, ensure_ascii=False, indent=2), flush=True)
+    _print_table(table_rows)
+    print(f"[done] saved Capability TriviaQA eval to {rel(output_dir)}", flush=True)
+
+
 def main() -> None:
     args = parse_args()
     data_root = resolve_from_code_root(args.data_root)
@@ -246,8 +361,24 @@ def main() -> None:
     output_dir = data_root / "eval_outputs" / "neuron_heads" / tag / "capability_triviaqa" if args.output_dir is None else resolve_from_code_root(args.output_dir)
     dataset_path = resolve_from_code_root(args.dataset_path)
 
-    if args.clean:
+    base_output_dir = output_dir
+    if PARALLEL.enabled and _completion_marker(base_output_dir).exists() and not args.clean:
+        if PARALLEL.is_main:
+            print(f"[skip] completed eight-GPU TriviaQA eval: {rel(base_output_dir)}", flush=True)
+        return
+    if PARALLEL.enabled and base_output_dir.exists() and not args.clean:
+        raise FileExistsError(
+            f"Existing output is not an eight-GPU completed run: {rel(base_output_dir)}. "
+            "Use --clean to start a new eight-GPU run without mixing artifacts."
+        )
+    work_root = worker_dir(base_output_dir, "capability_triviaqa", PARALLEL).parent
+    if args.clean and (not PARALLEL.enabled or PARALLEL.is_main):
         clean_path(output_dir, [data_root], "capability triviaqa eval output")
+        if PARALLEL.enabled:
+            clean_path(work_root, [data_root], "capability triviaqa worker cache")
+    PARALLEL.barrier()
+    if PARALLEL.enabled:
+        output_dir = worker_dir(base_output_dir, "capability_triviaqa", PARALLEL)
     output_dir.mkdir(parents=True, exist_ok=True)
 
     if not dataset_path.exists() and not args.allow_hf_fallback:
@@ -289,6 +420,11 @@ def main() -> None:
     )
 
     examples = trivia.load_examples_for_benchmark("triviaqa", dataset_cfg)
+    all_examples = examples
+    if PARALLEL.enabled:
+        start, end = contiguous_range(len(examples), PARALLEL)
+        examples = examples[start:end]
+        print(f"[parallel] rank={PARALLEL.rank}/{PARALLEL.world_size} examples={start}:{end}", flush=True)
     write_json(output_dir / "dataset_summary.json", {"benchmark": "triviaqa", "num_examples": len(examples)})
 
     standard_raw_path = output_dir / "standard_no_tool_rows_raw_generation.jsonl"
@@ -372,6 +508,22 @@ def main() -> None:
     write_jsonl(output_dir / "tool_enabled_rows.jsonl", tool_rows)
     trivia.save_rows_to_parquet(output_dir / "standard_no_tool_rows_scored_with_neuron_head.parquet", standard_rows, debug=bool(args.debug))
     trivia.save_rows_to_parquet(output_dir / "tool_enabled_rows.parquet", tool_rows, debug=bool(args.debug))
+
+    if PARALLEL.enabled:
+        PARALLEL.barrier()
+        if not PARALLEL.is_main:
+            PARALLEL.barrier()
+            return
+        _merge_parallel_eval(
+            args=args,
+            trivia=trivia,
+            output_dir=base_output_dir,
+            work_root=work_root,
+            examples=all_examples,
+            thresholds=thresholds,
+        )
+        PARALLEL.barrier()
+        return
 
     y_true = [int(row.get("base_correct", 0)) for row in standard_rows]
     y_prob = [float(row.get("aux_prob_correct")) for row in standard_rows if row.get("aux_prob_correct") is not None]

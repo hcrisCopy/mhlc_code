@@ -3,6 +3,10 @@ from __future__ import annotations
 
 import argparse
 
+from mhlc_data_prep.parallel import configure_parallel_context
+
+PARALLEL = configure_parallel_context()
+
 RESOLUTION_DEFAULT_DATASET = "../mhlc_data/data/train/when2call/qwen3vl/Qwen3-VL-4B-Instruct_4class"
 
 
@@ -68,11 +72,15 @@ def main() -> None:
     feature_dir = dirs["features"] if args.feature_cache_dir is None else data_root / args.feature_cache_dir
     out_dir = dirs["trained"] if args.output_dir is None else data_root / args.output_dir
     neuron_path = dirs["neurons"] / "selected_neurons.jsonl" if args.neuron_path is None else data_root / args.neuron_path
-    maybe_clean(feature_dir, data_root, "resolution feature cache", bool(args.clean))
-    maybe_clean(out_dir, data_root, "resolution neuron head", bool(args.clean))
+    if not PARALLEL.enabled or PARALLEL.is_main:
+        maybe_clean(feature_dir, data_root, "resolution feature cache", bool(args.clean))
+        maybe_clean(out_dir, data_root, "resolution neuron head", bool(args.clean))
+    PARALLEL.barrier()
     manifest_path = ensure_feature_cache(args, task="resolution", neuron_path=neuron_path, cache_dir=feature_dir)
-    final_path = train_neuron_head(args, task="resolution", manifest_path=manifest_path, out_dir=out_dir)
-    print(f"[done] {rel(final_path)}", flush=True)
+    if not PARALLEL.enabled or PARALLEL.is_main:
+        final_path = train_neuron_head(args, task="resolution", manifest_path=manifest_path, out_dir=out_dir)
+        print(f"[done] {rel(final_path)}", flush=True)
+    PARALLEL.barrier()
 
 
 if __name__ == "__main__":

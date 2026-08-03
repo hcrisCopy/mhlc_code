@@ -3,6 +3,10 @@ from __future__ import annotations
 
 import argparse
 
+from mhlc_data_prep.parallel import configure_parallel_context, contiguous_range
+
+PARALLEL = configure_parallel_context()
+
 CAPABILITY_DEFAULT_DATASET = (
     "../mhlc_data/data/train/Qwen3VL/"
     "Qwen3_VL_4B_Instruct_text_only_OriginalMixedShare_40851/verified"
@@ -76,7 +80,12 @@ def main() -> None:
         write_jsonl,
     )
     from mhlc_neuron_probe.selection import select_neurons
-    from mhlc_neuron_probe.stats import CapabilityRunningStats, summary_from_module_meta
+    from mhlc_neuron_probe.stats import (
+        CapabilityRunningStats,
+        capability_stats_state,
+        merge_capability_stats,
+        summary_from_module_meta,
+    )
     from mhlc_neuron_probe.visualization import plot_capability_direction, plot_layer_top_score_heatmap, plot_selected_density
 
     upstream = load_capability_trainer_module()
@@ -84,8 +93,10 @@ def main() -> None:
     data_root = prepare_data_root(args.data_root)
     tag = model_tag(args.model_path)
     dirs = output_dirs(data_root, tag, "capability")
-    maybe_clean(dirs["neurons"], data_root, "capability neuron artifacts", bool(args.clean))
-    maybe_clean(dirs["viz"], data_root, "capability neuron visualizations", bool(args.clean))
+    if not PARALLEL.enabled or PARALLEL.is_main:
+        maybe_clean(dirs["neurons"], data_root, "capability neuron artifacts", bool(args.clean))
+        maybe_clean(dirs["viz"], data_root, "capability neuron visualizations", bool(args.clean))
+    PARALLEL.barrier()
     dirs["neurons"].mkdir(parents=True, exist_ok=True)
     dirs["viz"].mkdir(parents=True, exist_ok=True)
 
@@ -113,6 +124,7 @@ def main() -> None:
         "min_score": float(args.min_score),
         "epsilon": float(args.epsilon),
         "use_down_norm": bool(args.use_down_norm),
+        "parallel_workers": PARALLEL.world_size,
         "score_formula": "relu_z(weighted_separation)+relu_z(abs_correlation)+0.5*relu_z(weighted_responsiveness)",
     }
     selected_path = dirs["neurons"] / "selected_neurons.jsonl"
@@ -120,6 +132,12 @@ def main() -> None:
     layer_csv = dirs["neurons"] / "layer_summary.csv"
     if should_skip(dirs["neurons"], params, [selected_path, score_path, layer_csv], bool(args.overwrite)):
         return
+
+    worker_dataset = dataset
+    if PARALLEL.enabled:
+        start, end = contiguous_range(len(dataset), PARALLEL)
+        worker_dataset = dataset.select(range(start, end))
+        print(f"[parallel] rank={PARALLEL.rank}/{PARALLEL.world_size} samples={start}:{end}", flush=True)
 
     runtime = load_frozen_backbone(
         model_name_or_path=args.model_path,
@@ -143,7 +161,7 @@ def main() -> None:
         low_threshold=float(group_info["low_threshold"]),
     )
     loader = DataLoader(
-        dataset,
+        worker_dataset,
         batch_size=int(args.batch_size),
         shuffle=False,
         collate_fn=capability_collator(runtime.processor, data_cfg),
@@ -165,6 +183,18 @@ def main() -> None:
                 with torch.autocast(device_type="cuda", dtype=autocast_dtype, enabled=autocast_enabled):
                     _ = runtime.forward_model(**forward_inputs, use_cache=False, return_dict=True)
             stats.update(collector.captures, batch_labels)
+
+    if PARALLEL.enabled:
+        partial_dir = dirs["neurons"] / ".probe_partials"
+        partial_dir.mkdir(parents=True, exist_ok=True)
+        torch.save(capability_stats_state(stats), partial_dir / f"rank_{PARALLEL.rank:02d}.pt")
+        PARALLEL.barrier()
+        if not PARALLEL.is_main:
+            PARALLEL.barrier()
+            return
+        stats = merge_capability_stats(
+            [torch.load(partial_dir / f"rank_{rank:02d}.pt", map_location="cpu") for rank in range(PARALLEL.world_size)]
+        )
 
     score_pack = stats.scores(down_norms=down_norms, use_down_norm=bool(args.use_down_norm), eps=float(args.epsilon))
     rows, layer_rows = select_neurons(
@@ -210,6 +240,7 @@ def main() -> None:
     write_json(dirs["neurons"] / "manifest.json", {"params": params, "summary": summary})
     print(f"[write] {rel(selected_path)}", flush=True)
     print(f"[write] {rel(dirs['viz'])}", flush=True)
+    PARALLEL.barrier()
 
 
 if __name__ == "__main__":

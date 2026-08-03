@@ -10,6 +10,8 @@ import torch
 from torch.utils.data import DataLoader, Dataset
 from tqdm.auto import tqdm
 
+from mhlc_data_prep.parallel import configure_parallel_context
+
 from .baseline_bridge import build_forward_inputs, load_frozen_backbone, move_batch_to_device
 from .data_tasks import (
     CapabilityDataConfig,
@@ -95,6 +97,7 @@ def _valid_shard(path: Path, expected_count: int, task: str) -> bool:
 
 
 def ensure_feature_cache(args: Any, *, task: str, neuron_path: Path, cache_dir: Path) -> Path:
+    parallel = configure_parallel_context()
     cache_dir.mkdir(parents=True, exist_ok=True)
     neuron_rows = read_jsonl(neuron_path)
     plan = build_feature_plan(neuron_rows)
@@ -154,10 +157,21 @@ def ensure_feature_cache(args: Any, *, task: str, neuron_path: Path, cache_dir: 
     shard_size = int(args.feature_shard_size)
     num_shards = math.ceil(len(dataset) / shard_size)
     shards: list[dict[str, Any]] = []
+    all_shards = [
+        {
+            "path": str(cache_dir / f"shard_{shard_id:05d}.pt"),
+            "start": shard_id * shard_size,
+            "end": min(len(dataset), (shard_id + 1) * shard_size),
+            "count": min(len(dataset), (shard_id + 1) * shard_size) - shard_id * shard_size,
+        }
+        for shard_id in range(num_shards)
+    ]
     save_dtype = torch.float16 if str(args.feature_save_dtype).lower() == "float16" else torch.float32
 
     with FFNActivationCollector(layers, save_dtype=torch.float32) as collector:
         for shard_id in range(num_shards):
+            if parallel.enabled and shard_id % parallel.world_size != parallel.rank:
+                continue
             start = shard_id * shard_size
             end = min(len(dataset), start + shard_size)
             shard_path = cache_dir / f"shard_{shard_id:05d}.pt"
@@ -226,6 +240,20 @@ def ensure_feature_cache(args: Any, *, task: str, neuron_path: Path, cache_dir: 
             shards.append({"path": str(shard_path), "start": start, "end": end, "count": expected_count})
             print(f"[write] {rel(shard_path)}", flush=True)
 
+    if parallel.enabled:
+        parallel.barrier()
+        if not parallel.is_main:
+            parallel.barrier()
+            return manifest_path
+        missing = [
+            item["path"]
+            for item in all_shards
+            if not _valid_shard(Path(item["path"]), int(item["count"]), task)
+        ]
+        if missing:
+            raise RuntimeError(f"Eight-GPU feature cache is incomplete; missing/invalid shards: {missing[:3]}")
+        shards = all_shards
+
     summary = {
         "task": task,
         "rows": len(dataset),
@@ -235,6 +263,7 @@ def ensure_feature_cache(args: Any, *, task: str, neuron_path: Path, cache_dir: 
     }
     write_json(manifest_path, {"params": params, "summary": summary, "shards": shards})
     compute_feature_norm(manifest_path)
+    parallel.barrier()
     return manifest_path
 
 
@@ -293,4 +322,3 @@ class ShardedFeatureDataset(Dataset):
             item["usable_mask"] = payload["usable_mask"][local].float()
             item["behavior_ids"] = payload["behavior_ids"][local].long()
         return item
-

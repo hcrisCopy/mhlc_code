@@ -11,6 +11,10 @@ from typing import Any, Sequence
 
 from tqdm.auto import tqdm
 
+from mhlc_data_prep.parallel import configure_parallel_context, contiguous_range, worker_dir
+
+PARALLEL = configure_parallel_context()
+
 from mhlc_data_prep.original import load_upstream_module
 from mhlc_data_prep.paths import ensure_mhlc_data_layout, resolve_from_code_root, set_hf_dirs_inside_data_root
 from mhlc_data_prep.run_utils import clean_path, rel
@@ -813,6 +817,152 @@ def _plot_table(rows: list[dict[str, Any]], output_path: Path, benchmarks: Seque
     plt.close(fig)
 
 
+def _completion_marker(output_dir: Path) -> Path:
+    return output_dir / ".capability_table2_eight_gpu_complete.json"
+
+
+def _worker_jsonl_rows(work_root: Path, relative_path: Path) -> list[dict[str, Any]]:
+    rows: list[dict[str, Any]] = []
+    for rank in range(PARALLEL.world_size):
+        path = work_root / f"rank_{rank:02d}" / relative_path
+        if not path.exists():
+            raise FileNotFoundError(f"Missing eight-GPU Table2 worker output: {rel(path)}")
+        rows.extend(read_jsonl(path))
+    return rows
+
+
+def _worker_skipped_rows(work_root: Path, relative_path: Path) -> list[dict[str, Any]]:
+    rows: list[dict[str, Any]] = []
+    for rank in range(PARALLEL.world_size):
+        path = work_root / f"rank_{rank:02d}" / relative_path
+        if not path.exists():
+            raise FileNotFoundError(f"Missing eight-GPU Table2 worker skipped-row file: {rel(path)}")
+        payload = json.loads(path.read_text(encoding="utf-8"))
+        if isinstance(payload, list):
+            rows.extend(payload)
+    return rows
+
+
+def _write_merged_strategy(
+    *,
+    eval_mod: Any,
+    benchmark: str,
+    strategy_name: str,
+    out_dir: Path,
+    raw_rows: list[dict[str, Any]],
+    scored_rows: list[dict[str, Any]],
+    skipped_rows: list[dict[str, Any]],
+) -> dict[str, Any]:
+    out_dir.mkdir(parents=True, exist_ok=True)
+    write_jsonl(out_dir / "results.jsonl", raw_rows)
+    write_jsonl(out_dir / "results_scored.jsonl", scored_rows)
+    write_json(out_dir / "results_scored_skipped.json", skipped_rows)
+    summary = eval_mod.safe_summarize_scored_rows(benchmark, strategy_name, scored_rows, skipped_rows)
+    summary.update(eval_mod.summarize_strategy_cost_and_routing(benchmark, scored_rows))
+    summary["primary_metric_name"] = eval_mod.benchmark_primary_metric_name(benchmark)
+    summary["primary_metric_value"] = eval_mod.benchmark_primary_metric_value(benchmark, summary)
+    write_json(out_dir / "summary_scored.json", summary)
+    return summary
+
+
+def _merge_parallel_table2(
+    *,
+    args: argparse.Namespace,
+    shared: Any,
+    eval_mod: Any,
+    output_dir: Path,
+    work_root: Path,
+    benchmarks: list[str],
+    thresholds: list[float],
+    multi_threshold: bool,
+) -> None:
+    """Join worker caches and recompute Table2 metrics with upstream evaluators."""
+    output_dir.mkdir(parents=True, exist_ok=True)
+    write_json(output_dir / "run_config.json", {
+        "model1_path": args.model1_path,
+        "model2_path": args.model2_path,
+        "benchmarks": benchmarks,
+        "max_samples": int(args.max_samples),
+        "thresholds": thresholds,
+        "parallel_workers": PARALLEL.world_size,
+        "judge_model_path": args.judge_model_path,
+        "m2_input_cost_per_1m_usd": float(args.m2_input_cost_per_1m_usd),
+        "m2_output_cost_per_1m_usd": float(args.m2_output_cost_per_1m_usd),
+        "cost_note": "Paid cost counts only model2 generation tokens, matching Table 2 convention.",
+    })
+    all_rows_by_threshold: dict[float, list[dict[str, Any]]] = {threshold: [] for threshold in thresholds}
+    for benchmark in benchmarks:
+        bench_dir = output_dir / benchmark
+        bench_dir.mkdir(parents=True, exist_ok=True)
+        m1_rel = Path(benchmark) / "single_agent_model1" / "results.jsonl"
+        m2_rel = Path(benchmark) / "single_agent_model2" / "results.jsonl"
+        m1_rows = _worker_jsonl_rows(work_root, m1_rel)
+        m2_rows = _worker_jsonl_rows(work_root, m2_rel)
+        write_json(bench_dir / "dataset_summary.json", {"benchmark": benchmark, "num_examples": len(m1_rows), "parallel_workers": PARALLEL.world_size})
+        write_jsonl(bench_dir / "head_scores_mhlc.jsonl", _worker_jsonl_rows(work_root, Path(benchmark) / "head_scores_mhlc.jsonl"))
+        write_jsonl(bench_dir / "head_scores_ours.jsonl", _worker_jsonl_rows(work_root, Path(benchmark) / "head_scores_ours.jsonl"))
+
+        generation_sets = [
+            ("Backbone Choice", "single_agent_model1", m1_rows),
+            ("Always Call Strong Model", "single_agent_model2", m2_rows),
+        ]
+        for display_name, strategy_name, raw_rows in generation_sets:
+            relative_dir = Path(benchmark) / strategy_name
+            summary = _write_merged_strategy(
+                eval_mod=eval_mod,
+                benchmark=benchmark,
+                strategy_name=strategy_name,
+                out_dir=bench_dir / strategy_name,
+                raw_rows=raw_rows,
+                scored_rows=_worker_jsonl_rows(work_root, relative_dir / "results_scored.jsonl"),
+                skipped_rows=_worker_skipped_rows(work_root, relative_dir / "results_scored_skipped.json"),
+            )
+            for threshold in thresholds:
+                all_rows_by_threshold[threshold].append(_summary_row(
+                    display_name, benchmark, summary, args.m2_input_cost_per_1m_usd, args.m2_output_cost_per_1m_usd, threshold=threshold
+                ))
+
+        for display_name, strategy_name in [
+            ("Backbone + Capability Head（MHLC）", "routed_mhlc"),
+            ("Backbone + Capability Head（Ours）", "routed_ours"),
+        ]:
+            for threshold in thresholds:
+                strategy_dir = _strategy_dir(bench_dir, strategy_name, threshold, multi_threshold=multi_threshold)
+                relative_dir = strategy_dir.relative_to(output_dir)
+                summary = _write_merged_strategy(
+                    eval_mod=eval_mod,
+                    benchmark=benchmark,
+                    strategy_name=f"{strategy_name}_threshold_{_threshold_tag(threshold)}" if multi_threshold else strategy_name,
+                    out_dir=strategy_dir,
+                    raw_rows=_worker_jsonl_rows(work_root, relative_dir / "results.jsonl"),
+                    scored_rows=_worker_jsonl_rows(work_root, relative_dir / "results_scored.jsonl"),
+                    skipped_rows=_worker_skipped_rows(work_root, relative_dir / "results_scored_skipped.json"),
+                )
+                all_rows_by_threshold[threshold].append(_summary_row(
+                    display_name, benchmark, summary, args.m2_input_cost_per_1m_usd, args.m2_output_cost_per_1m_usd, threshold=threshold
+                ))
+
+    tables: list[dict[str, Any]] = []
+    combined_rows: list[dict[str, Any]] = []
+    for index, threshold in enumerate(thresholds):
+        table_rows = _overall_rows(all_rows_by_threshold[threshold], benchmarks)
+        tables.append({"threshold": float(threshold), "rows": table_rows})
+        combined_rows.extend(table_rows)
+        suffix = _threshold_tag(threshold)
+        write_json(output_dir / f"table2_textbench_comparison_threshold_{suffix}.json", {"threshold": float(threshold), "rows": table_rows})
+        write_csv(output_dir / f"table2_textbench_comparison_threshold_{suffix}.csv", table_rows)
+        _plot_table(table_rows, output_dir / "plots" / f"table2_score_cost_threshold_{suffix}.png", benchmarks)
+        if index == 0:
+            _plot_table(table_rows, output_dir / "plots" / "table2_score_cost.png", benchmarks)
+        _print_table(table_rows, benchmarks, threshold)
+    write_json(output_dir / "table2_textbench_comparison.json", {"thresholds": thresholds, "tables": tables, "rows": combined_rows})
+    write_csv(output_dir / "table2_textbench_comparison.csv", combined_rows)
+    _completion_marker(output_dir).write_text(
+        json.dumps({"world_size": PARALLEL.world_size, "benchmarks": benchmarks}, ensure_ascii=False, indent=2), encoding="utf-8"
+    )
+    print(f"[done] saved Table 2 style textbench eval to {rel(output_dir)}", flush=True)
+
+
 def main() -> None:
     args = parse_args()
     thresholds = _parse_thresholds(args.thresholds, args.threshold)
@@ -834,8 +984,24 @@ def main() -> None:
         if args.output_dir is None else resolve_from_code_root(args.output_dir)
     )
 
-    if args.clean:
+    base_output_dir = output_dir
+    if PARALLEL.enabled and _completion_marker(base_output_dir).exists() and not args.clean:
+        if PARALLEL.is_main:
+            print(f"[skip] completed eight-GPU Table2 eval: {rel(base_output_dir)}", flush=True)
+        return
+    if PARALLEL.enabled and base_output_dir.exists() and not args.clean:
+        raise FileExistsError(
+            f"Existing output is not an eight-GPU completed run: {rel(base_output_dir)}. "
+            "Use --clean to start a new eight-GPU run without mixing artifacts."
+        )
+    work_root = worker_dir(base_output_dir, "capability_table2", PARALLEL).parent
+    if args.clean and (not PARALLEL.enabled or PARALLEL.is_main):
         clean_path(output_dir, [data_root], "capability table2 textbench eval output")
+        if PARALLEL.enabled:
+            clean_path(work_root, [data_root], "capability table2 worker cache")
+    PARALLEL.barrier()
+    if PARALLEL.enabled:
+        output_dir = worker_dir(base_output_dir, "capability_table2", PARALLEL)
     output_dir.mkdir(parents=True, exist_ok=True)
 
     if not ours_head_path.exists():
@@ -909,6 +1075,10 @@ def main() -> None:
             bench_dir = output_dir / benchmark
             bench_dir.mkdir(parents=True, exist_ok=True)
             examples = shared.load_examples_for_benchmark(benchmark, dataset_cfgs[benchmark])
+            if PARALLEL.enabled:
+                start, end = contiguous_range(len(examples), PARALLEL)
+                examples = examples[start:end]
+                print(f"[parallel] {benchmark} rank={PARALLEL.rank}/{PARALLEL.world_size} examples={start}:{end}", flush=True)
             write_json(bench_dir / "dataset_summary.json", {"benchmark": benchmark, "num_examples": len(examples), "dataset_cfg": dataset_cfgs[benchmark]})
             print(f"[data] {benchmark} examples={len(examples)}", flush=True)
 
@@ -1037,6 +1207,24 @@ def main() -> None:
     finally:
         if judge_runtime is not None:
             judge_runtime.unload(drop_processor=False)
+
+    if PARALLEL.enabled:
+        PARALLEL.barrier()
+        if not PARALLEL.is_main:
+            PARALLEL.barrier()
+            return
+        _merge_parallel_table2(
+            args=args,
+            shared=shared,
+            eval_mod=eval_mod,
+            output_dir=base_output_dir,
+            work_root=work_root,
+            benchmarks=benchmarks,
+            thresholds=thresholds,
+            multi_threshold=multi_threshold,
+        )
+        PARALLEL.barrier()
+        return
 
     tables: list[dict[str, Any]] = []
     combined_rows: list[dict[str, Any]] = []

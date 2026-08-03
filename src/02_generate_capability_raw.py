@@ -2,8 +2,19 @@
 from __future__ import annotations
 
 import argparse
+import json
 from pathlib import Path
 from typing import Any
+
+from mhlc_data_prep.parallel import (
+    configure_parallel_context,
+    contiguous_range,
+    require_single_gpu_vllm,
+    worker_dir,
+)
+
+# Must happen before an upstream module imports torch / vLLM.
+PARALLEL = configure_parallel_context()
 
 from datasets import DatasetDict, load_from_disk
 from tqdm.auto import tqdm
@@ -136,11 +147,17 @@ def patch_generation_progress(module: Any) -> None:
         first_flush = True
         modality = module.SOURCE_CONFIGS[source_name]["modality"]
 
+        rank_prefix = (
+            f"rank {PARALLEL.rank + 1}/{PARALLEL.world_size} "
+            if PARALLEL.enabled
+            else ""
+        )
         progress_bar = tqdm(
             total=len(pending_specs),
-            desc=f"generate {source_name}",
+            desc=f"{rank_prefix}generate {source_name}",
             unit="req",
             dynamic_ncols=True,
+            position=PARALLEL.rank if PARALLEL.enabled else 0,
             leave=True,
         )
 
@@ -244,6 +261,88 @@ def patch_generation_progress(module: Any) -> None:
     module._generate_source = generate_source_with_progress
 
 
+def patch_parallel_source_partition(module: Any) -> None:
+    """Keep upstream sampling intact, then give each worker a disjoint slice."""
+    original_sample_source = module._sample_source
+
+    def partitioned_sample_source(ds: Any, source_name: str, target_count: int):
+        selected, stats = original_sample_source(ds, source_name, target_count)
+        start, end = contiguous_range(len(selected), PARALLEL)
+        part = selected[start:end]
+        stats = dict(stats)
+        stats.update(
+            {
+                "selected_before_partition": len(selected),
+                "selected": len(part),
+                "parallel_rank": PARALLEL.rank,
+                "parallel_world_size": PARALLEL.world_size,
+                "parallel_start": start,
+                "parallel_end": end,
+            }
+        )
+        return part, stats
+
+    module._sample_source = partitioned_sample_source
+
+
+def _parallel_completion_marker(save_root: Path) -> Path:
+    return save_root / ".capability_raw_eight_gpu_complete.json"
+
+
+def _merge_parallel_raw_outputs(module: Any, save_root: Path, work_root: Path, args: argparse.Namespace) -> None:
+    """Restore the ordinary upstream raw layout after all workers finish."""
+    raw_rows: list[dict[str, Any]] = []
+    for rank in range(PARALLEL.world_size):
+        rank_raw = work_root / f"rank_{rank:02d}" / "raw"
+        for shard_path in sorted(rank_raw.glob("shard-*.parquet")):
+            raw_rows.extend(module.load_dataset("parquet", data_files=str(shard_path), split="train").to_list())
+
+    source_order = {name: index for index, name in enumerate(TEXT_SOURCE_COUNTS)}
+    raw_rows.sort(
+        key=lambda row: (
+            source_order.get(str(row.get("subset_name", "")), len(source_order)),
+            int(row.get("row_index", -1)),
+            int(row.get("qa_index", -1)),
+            int(row.get("turn_index", -1)),
+            int(row.get("generation_index", 0)),
+        )
+    )
+    raw_dir = save_root / "raw"
+    raw_dir.mkdir(parents=True, exist_ok=True)
+    shard_size = int(args.raw_shard_size)
+    for shard_index, start in enumerate(range(0, len(raw_rows), shard_size), start=1):
+        module._save_shard(raw_rows[start:start + shard_size], raw_dir, shard_index)
+
+    requested_counts = module._allocate_counts(int(args.total_qa_pairs), module.SOURCE_PORTIONS)
+    module._save_json(
+        save_root / "selection_manifest.json",
+        {
+            "model_id": str(args.model_path),
+            "model_family": args.model_family,
+            "thinking_mode_requested": args.thinking_mode,
+            "total_examples_requested": int(args.total_qa_pairs),
+            "requested_source_counts": dict(requested_counts),
+            "parallel_workers": PARALLEL.world_size,
+            "merge_order": "upstream source order, then source row / turn identity",
+        },
+    )
+    module._save_json(
+        save_root / "generation_stats.json",
+        {
+            "model_id": str(args.model_path),
+            "parallel_workers": PARALLEL.world_size,
+            "total_selected_examples": len(raw_rows),
+            "total_outputs": len(raw_rows),
+            "raw_shards": len(list(raw_dir.glob("shard-*.parquet"))),
+        },
+    )
+    _parallel_completion_marker(save_root).write_text(
+        json.dumps({"world_size": PARALLEL.world_size, "rows": len(raw_rows)}, ensure_ascii=False, indent=2),
+        encoding="utf-8",
+    )
+    print(f"[merge] capability raw workers -> {rel(raw_dir)} rows={len(raw_rows)}", flush=True)
+
+
 def main() -> None:
     ap = argparse.ArgumentParser(
         description="Generate text-only MHLC Capability Head raw parquet with upstream logic and local materialized sources."
@@ -278,6 +377,8 @@ def main() -> None:
     )
     args = ap.parse_args()
 
+    require_single_gpu_vllm(args.tensor_parallel_size, PARALLEL)
+
     data_root = resolve_from_code_root(args.data_root)
     ensure_mhlc_data_layout(data_root)
     set_hf_dirs_inside_data_root(data_root)
@@ -294,8 +395,21 @@ def main() -> None:
 
     model_path = resolve_from_code_root(args.model_path)
     save_root = resolve_from_code_root(args.save_root)
-    if args.clean:
+    if PARALLEL.enabled and _parallel_completion_marker(save_root).exists() and not args.clean:
+        if PARALLEL.is_main:
+            print(f"[skip] completed eight-GPU capability raw run: {rel(save_root)}", flush=True)
+        return
+    if PARALLEL.enabled and save_root.exists() and not args.clean:
+        raise FileExistsError(
+            f"Existing output is not an eight-GPU completed run: {rel(save_root)}. "
+            "Use --clean to start a new eight-GPU run without mixing artifacts."
+        )
+    work_root = worker_dir(save_root, "capability_raw", PARALLEL).parent
+    if args.clean and (not PARALLEL.enabled or PARALLEL.is_main):
         clean_path(save_root, [data_root], "capability raw run")
+        if PARALLEL.enabled:
+            clean_path(work_root, [data_root], "capability raw worker cache")
+    PARALLEL.barrier()
 
     module = load_upstream_module(
         "combined_all_datagen_multimodel.py",
@@ -306,6 +420,10 @@ def main() -> None:
         patch_exact_source_counts(module, source_counts)
     patch_source_loader(module, data_root, allow_hf_fallback=bool(args.allow_hf_fallback))
     patch_generation_progress(module)
+    worker_save_root = save_root
+    if PARALLEL.enabled:
+        patch_parallel_source_partition(module)
+        worker_save_root = worker_dir(save_root, "capability_raw", PARALLEL)
 
     argv = [
         "combined_all_datagen_multimodel.py",
@@ -318,7 +436,7 @@ def main() -> None:
         "--run-name",
         args.run_name,
         "--save-root",
-        rel(save_root),
+        rel(worker_save_root),
         "--total-qa-pairs",
         str(args.total_qa_pairs),
         "--max-model-len",
@@ -341,8 +459,14 @@ def main() -> None:
         print("[mode] smoke source counts override is active; omit --source-counts for formal full run")
     print(f"[model] {rel(model_path)}")
     print(f"[output] {rel(save_root)}")
+    if PARALLEL.enabled:
+        print(f"[parallel] rank={PARALLEL.rank}/{PARALLEL.world_size} worker_output={rel(worker_save_root)}")
     with temporary_argv(argv):
         module.main()
+    PARALLEL.barrier()
+    if PARALLEL.enabled and PARALLEL.is_main:
+        _merge_parallel_raw_outputs(module, save_root, work_root, args)
+    PARALLEL.barrier()
 
 
 if __name__ == "__main__":

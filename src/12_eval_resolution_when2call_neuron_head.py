@@ -8,6 +8,10 @@ from typing import Any, Sequence
 
 from tqdm.auto import tqdm
 
+from mhlc_data_prep.parallel import configure_parallel_context, contiguous_range, worker_dir
+
+PARALLEL = configure_parallel_context()
+
 from mhlc_data_prep.original import load_upstream_module
 from mhlc_data_prep.paths import ensure_mhlc_data_layout, resolve_from_code_root, set_hf_dirs_inside_data_root
 from mhlc_data_prep.run_utils import clean_path, rel
@@ -243,6 +247,105 @@ def _print_table(rows: list[dict[str, Any]]) -> None:
         )
 
 
+def _completion_marker(output_dir: Path) -> Path:
+    return output_dir / ".resolution_when2call_eight_gpu_complete.json"
+
+
+def _merge_parallel_eval(
+    *,
+    args: argparse.Namespace,
+    when2call: Any,
+    output_dir: Path,
+    work_root: Path,
+    rows: list[dict[str, Any]],
+    row_stats: dict[str, Any],
+    head_class_names: list[str],
+    behavior_class_names: list[str],
+    behavior_to_id: dict[str, int],
+    decision_threshold: float,
+) -> None:
+    records_by_key: dict[str, dict[str, Any]] = {}
+    for rank in range(PARALLEL.world_size):
+        path = work_root / f"rank_{rank:02d}" / "predictions.jsonl"
+        if not path.exists():
+            raise FileNotFoundError(f"Missing eight-GPU Resolution worker output: {rel(path)}")
+        for record in read_jsonl(path):
+            records_by_key[str(record.get("uuid") or "")] = record
+    records = [records_by_key[_row_key(row, index)] for index, row in enumerate(rows)]
+    output_dir.mkdir(parents=True, exist_ok=True)
+    plots_dir = output_dir / "plots"
+
+    gold_ids: list[int] = []
+    pred_ids: list[int] = []
+    pred_score_correct: list[float] = []
+    pred_score_wrong: list[float] = []
+    gold_score_correct: list[float] = []
+    gold_score_wrong: list[float] = []
+    prob_one_vs_rest = {name: [] for name in behavior_class_names}
+    per_pred_class_scores = {name: {"correct": [], "wrong": []} for name in behavior_class_names}
+    for record in records:
+        gold_name = when2call.normalize_class_name(record["gold_label"])
+        pred_name = when2call.normalize_class_name(record["head_pred_label"])
+        gold_id = behavior_to_id[gold_name]
+        pred_id = behavior_to_id[pred_name]
+        pred_score = float(record["head_pred_score"])
+        gold_score = float(record["head_gold_behavior_score"])
+        is_correct = int(pred_id == gold_id)
+        gold_ids.append(gold_id)
+        pred_ids.append(pred_id)
+        if is_correct:
+            pred_score_correct.append(pred_score)
+            gold_score_correct.append(gold_score)
+            per_pred_class_scores[pred_name]["correct"].append(pred_score)
+        else:
+            pred_score_wrong.append(pred_score)
+            gold_score_wrong.append(gold_score)
+            per_pred_class_scores[pred_name]["wrong"].append(pred_score)
+        for cls_name in behavior_class_names:
+            prob_one_vs_rest[cls_name].append(float(record["behavior_scores"][cls_name]))
+
+    head_metrics = when2call.confusion_and_metrics(gold_ids, pred_ids, behavior_class_names)
+    metrics = {
+        "num_rows_scored": len(rows), "head_class_names": head_class_names, "behavior_class_names": behavior_class_names,
+        "row_filter_stats": row_stats, "decision_threshold": float(decision_threshold), "head_on_generated_completion": head_metrics,
+    }
+    write_json(output_dir / "metrics.json", metrics)
+    write_jsonl(output_dir / "predictions.jsonl", records)
+    prob_summary = {
+        "predicted_behavior_score_correct_mean": _safe_mean(pred_score_correct),
+        "predicted_behavior_score_wrong_mean": _safe_mean(pred_score_wrong),
+        "gold_behavior_score_correct_mean": _safe_mean(gold_score_correct),
+        "gold_behavior_score_wrong_mean": _safe_mean(gold_score_wrong), "per_predicted_class": {},
+    }
+    for cls_name in behavior_class_names:
+        correct_vals = per_pred_class_scores[cls_name]["correct"]
+        wrong_vals = per_pred_class_scores[cls_name]["wrong"]
+        prob_summary["per_predicted_class"][cls_name] = {
+            "num_correct_predictions": len(correct_vals), "num_wrong_predictions": len(wrong_vals),
+            "mean_prob_when_correct": _safe_mean(correct_vals), "mean_prob_when_wrong": _safe_mean(wrong_vals),
+        }
+    write_json(output_dir / "probability_summary.json", prob_summary)
+    _write_probability_plots(
+        when2call=when2call, plots_dir=plots_dir, metrics=metrics, behavior_class_names=behavior_class_names,
+        pred_score_correct=pred_score_correct, pred_score_wrong=pred_score_wrong, gold_score_correct=gold_score_correct,
+        gold_score_wrong=gold_score_wrong, per_pred_class_scores=per_pred_class_scores, prob_one_vs_rest=prob_one_vs_rest,
+    )
+    comparison_rows = _comparison_rows(args.model_path, head_metrics)
+    write_json(output_dir / "paper_table3_comparison.json", {"rows": comparison_rows, "paper_source": "Multi-Head Latent Control Table 3"})
+    write_csv(output_dir / "paper_table3_comparison.csv", comparison_rows)
+    summary = {
+        "benchmark": "when2call", "model_path": args.model_path, "num_rows": len(rows), "metrics": metrics,
+        "probability_summary": prob_summary, "paper_table3_comparison": comparison_rows, "parallel_workers": PARALLEL.world_size,
+    }
+    write_json(output_dir / "summary.json", summary)
+    _completion_marker(output_dir).write_text(
+        json.dumps({"world_size": PARALLEL.world_size, "rows": len(records)}, ensure_ascii=False, indent=2), encoding="utf-8"
+    )
+    print(json.dumps(summary, ensure_ascii=False, indent=2), flush=True)
+    _print_table(comparison_rows)
+    print(f"[done] saved Resolution When2Call eval to {rel(output_dir)}", flush=True)
+
+
 def main() -> None:
     args = parse_args()
     data_root = resolve_from_code_root(args.data_root)
@@ -254,10 +357,25 @@ def main() -> None:
     neuron_path = dirs["neurons"] / "selected_neurons.jsonl" if args.neuron_path is None else resolve_from_code_root(args.neuron_path)
     generated_eval_path = resolve_from_code_root(args.generated_eval_path)
     output_dir = data_root / "eval_outputs" / "neuron_heads" / tag / "resolution_when2call" if args.output_dir is None else resolve_from_code_root(args.output_dir)
-    plots_dir = output_dir / "plots"
-
-    if args.clean:
+    base_output_dir = output_dir
+    if PARALLEL.enabled and _completion_marker(base_output_dir).exists() and not args.clean:
+        if PARALLEL.is_main:
+            print(f"[skip] completed eight-GPU Resolution eval: {rel(base_output_dir)}", flush=True)
+        return
+    if PARALLEL.enabled and base_output_dir.exists() and not args.clean:
+        raise FileExistsError(
+            f"Existing output is not an eight-GPU completed run: {rel(base_output_dir)}. "
+            "Use --clean to start a new eight-GPU run without mixing artifacts."
+        )
+    work_root = worker_dir(base_output_dir, "resolution_when2call", PARALLEL).parent
+    if args.clean and (not PARALLEL.enabled or PARALLEL.is_main):
         clean_path(output_dir, [data_root], "resolution when2call eval output")
+        if PARALLEL.enabled:
+            clean_path(work_root, [data_root], "resolution eval worker cache")
+    PARALLEL.barrier()
+    if PARALLEL.enabled:
+        output_dir = worker_dir(base_output_dir, "resolution_when2call", PARALLEL)
+    plots_dir = output_dir / "plots"
     output_dir.mkdir(parents=True, exist_ok=True)
     plots_dir.mkdir(parents=True, exist_ok=True)
 
@@ -300,6 +418,11 @@ def main() -> None:
     )
     if not rows:
         raise ValueError("No supported eval rows remain after filtering.")
+    all_rows = rows
+    if PARALLEL.enabled:
+        start, end = contiguous_range(len(rows), PARALLEL)
+        rows = rows[start:end]
+        print(f"[parallel] rank={PARALLEL.rank}/{PARALLEL.world_size} rows={start}:{end}", flush=True)
 
     config_used = {
         "model_path": args.model_path,
@@ -401,6 +524,26 @@ def main() -> None:
         print(f"[skip] resolution scores already complete: {rel(predictions_path)}", flush=True)
 
     records = [records_by_key[key] for key, _row in row_pairs]
+
+    if PARALLEL.enabled:
+        PARALLEL.barrier()
+        if not PARALLEL.is_main:
+            PARALLEL.barrier()
+            return
+        _merge_parallel_eval(
+            args=args,
+            when2call=when2call,
+            output_dir=base_output_dir,
+            work_root=work_root,
+            rows=all_rows,
+            row_stats=row_stats,
+            head_class_names=head_class_names,
+            behavior_class_names=behavior_class_names,
+            behavior_to_id=behavior_to_id,
+            decision_threshold=decision_threshold,
+        )
+        PARALLEL.barrier()
+        return
 
     gold_ids: list[int] = []
     pred_ids: list[int] = []

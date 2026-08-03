@@ -256,3 +256,82 @@ def summary_from_module_meta(module_meta: list[dict[str, Any]]) -> dict[str, int
     total = sum(int(meta["dim"]) for meta in module_meta)
     return {"layers": len(module_meta), "total_ffn_neurons": int(total)}
 
+
+def capability_stats_state(stats: CapabilityRunningStats) -> dict[str, Any]:
+    """CPU-only, torch-save-safe representation for eight-GPU aggregation."""
+    return {
+        "high_threshold": stats.high_threshold,
+        "low_threshold": stats.low_threshold,
+        "n": stats.n,
+        "sum_y": stats.sum_y,
+        "sum_y2": stats.sum_y2,
+        "layers": {
+            key: {
+                "dim": layer.dim,
+                "n": layer.n,
+                "high_n": layer.high_n,
+                "low_n": layer.low_n,
+                "sum_x": layer.sum_x,
+                "sum_x2": layer.sum_x2,
+                "sum_xy": layer.sum_xy,
+                "high_sum": layer.high_sum,
+                "high_sum2": layer.high_sum2,
+                "low_sum": layer.low_sum,
+                "low_sum2": layer.low_sum2,
+            }
+            for key, layer in stats.layers.items()
+        },
+    }
+
+
+def merge_capability_stats(states: list[dict[str, Any]]) -> CapabilityRunningStats:
+    if not states:
+        raise ValueError("No Capability statistics were provided for merge.")
+    merged = CapabilityRunningStats(
+        high_threshold=float(states[0]["high_threshold"]),
+        low_threshold=float(states[0]["low_threshold"]),
+    )
+    for state in states:
+        merged.n += int(state["n"])
+        merged.sum_y += float(state["sum_y"])
+        merged.sum_y2 += float(state["sum_y2"])
+        for key, values in state["layers"].items():
+            layer = merged._ensure(key, int(values["dim"]))
+            layer.n += int(values["n"])
+            layer.high_n += int(values["high_n"])
+            layer.low_n += int(values["low_n"])
+            for name in ("sum_x", "sum_x2", "sum_xy", "high_sum", "high_sum2", "low_sum", "low_sum2"):
+                setattr(layer, name, getattr(layer, name) + values[name].to(torch.float64))
+    return merged
+
+
+def resolution_stats_state(stats: ResolutionRunningStats) -> dict[str, Any]:
+    return {
+        "n": stats.n,
+        "layers": {
+            key: {
+                "dim": layer.dim,
+                "n": layer.n,
+                "pos_n": layer.pos_n,
+                "sum_x": layer.sum_x,
+                "sum_x2": layer.sum_x2,
+                "pos_sum": layer.pos_sum,
+                "pos_sum2": layer.pos_sum2,
+            }
+            for key, layer in stats.layers.items()
+        },
+    }
+
+
+def merge_resolution_stats(states: list[dict[str, Any]]) -> ResolutionRunningStats:
+    if not states:
+        raise ValueError("No Resolution statistics were provided for merge.")
+    merged = ResolutionRunningStats()
+    for state in states:
+        merged.n += int(state["n"])
+        for key, values in state["layers"].items():
+            layer = merged._ensure(key, int(values["dim"]))
+            layer.n += int(values["n"])
+            for name in ("pos_n", "sum_x", "sum_x2", "pos_sum", "pos_sum2"):
+                setattr(layer, name, getattr(layer, name) + values[name].to(torch.float64))
+    return merged
